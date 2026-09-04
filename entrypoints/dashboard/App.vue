@@ -65,6 +65,7 @@ import {
   ImageOff
 } from 'lucide-vue-next';
 import PostCard from './components/PostCard.vue';
+import DashboardSection from './components/DashboardSection.vue';
 
 // State
 const activeTab = ref<'feed' | 'creators' | 'bookmarks' | 'settings'>('feed');
@@ -1705,7 +1706,7 @@ function formatTime(timestamp: number) {
     <main class="flex-1 w-full max-w-[98%] 2xl:max-w-[96%] mx-auto px-3 sm:px-6 py-5">
 
       <!-- ==================== VIEW 1: AGGREGATED FEED (3-COLUMN DASHBOARD) ==================== -->
-      <section v-if="activeTab === 'feed'" class="flex flex-col lg:flex-row items-start gap-4 xl:gap-5">
+      <DashboardSection :active="activeTab === 'feed'" class-name="flex flex-col lg:flex-row items-start gap-4 xl:gap-5">
 
         <!-- 1. LEFT SIDEBAR: Platform, Tags & Filters Navigation -->
         <aside class="w-full lg:w-48 xl:w-52 shrink-0 space-y-3.5 lg:sticky lg:top-20">
@@ -2106,10 +2107,10 @@ function formatTime(timestamp: number) {
             </div>
           </div>
         </aside>
-      </section>
+      </DashboardSection>
 
       <!-- ==================== VIEW 2: CREATOR MANAGEMENT ==================== -->
-      <section v-else-if="activeTab === 'creators'" class="space-y-6">
+      <DashboardSection :active="activeTab === 'creators'" class-name="space-y-6">
         <!-- Header & Action Toolbar -->
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
@@ -2546,10 +2547,10 @@ function formatTime(timestamp: number) {
             </div>
           </div>
         </div>
-      </section>
+      </DashboardSection>
 
       <!-- ==================== VIEW 3: BOOKMARKS / FAVORITES ==================== -->
-      <section v-else-if="activeTab === 'bookmarks'" class="space-y-5">
+      <DashboardSection :active="activeTab === 'bookmarks'" class-name="space-y-5">
         <!-- Bookmarks Header & Filter Bar -->
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
@@ -2669,10 +2670,10 @@ function formatTime(timestamp: number) {
             </div>
           </div>
         </div>
-      </section>
+      </DashboardSection>
 
       <!-- ==================== VIEW 4: SETTINGS ==================== -->
-      <section v-else-if="activeTab === 'settings'" class="max-w-3xl mx-auto space-y-6">
+      <DashboardSection :active="activeTab === 'settings'" class-name="max-w-3xl mx-auto space-y-6">
         <!-- Security & Architecture Guarantee Banner -->
         <div class="p-5 bg-gradient-to-r from-indigo-900/10 to-violet-900/10 dark:from-indigo-950/50 dark:to-violet-950/50 border border-indigo-200 dark:border-indigo-800/60 rounded-2xl flex items-start gap-3">
           <ShieldCheck class="w-6 h-6 text-indigo-600 dark:text-indigo-400 shrink-0 mt-0.5" />
@@ -3014,7 +3015,7 @@ function formatTime(timestamp: number) {
             </div>
           </div>
         </div>
-      </section>
+      </DashboardSection>
     </main>
 
     <!-- Modal: Add Creator or Channel -->
