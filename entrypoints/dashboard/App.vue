@@ -2317,12 +2317,12 @@ function formatTime(timestamp: number) {
         </div>
 
         <!-- Creator Cards Grid -->
-        <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-4 xl:gap-5 items-start">
           <div
             v-for="c in filteredCreatorsList"
             :key="c.id"
-            class="p-5 bg-white dark:bg-slate-900 rounded-2xl border transition-all duration-200 shadow-2xs space-y-4 relative"
-            :class="selectedCreatorIds.has(c.id) ? 'border-indigo-500 ring-2 ring-indigo-500/20 bg-indigo-50/20 dark:bg-indigo-950/20' : 'border-slate-200/80 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700'"
+            class="self-start p-4 bg-white dark:bg-slate-900 rounded-2xl border transition-all duration-200 shadow-sm space-y-3.5 relative overflow-hidden"
+            :class="selectedCreatorIds.has(c.id) ? 'border-indigo-500 ring-2 ring-indigo-500/20 bg-indigo-50/20 dark:bg-indigo-950/20' : 'border-slate-200/80 dark:border-slate-800 hover:border-indigo-300 dark:hover:border-indigo-700 hover:shadow-md'"
           >
             <!-- Top Row: Avatar, Name, Stats & Actions -->
             <div class="flex items-start justify-between gap-3">
@@ -2338,7 +2338,7 @@ function formatTime(timestamp: number) {
                 </button>
 
                 <!-- Avatar -->
-                <div class="w-12 h-12 rounded-2xl bg-indigo-50 dark:bg-indigo-950/60 flex items-center justify-center text-indigo-600 font-black text-lg overflow-hidden border border-indigo-100 dark:border-indigo-900 shrink-0">
+                <div class="w-11 h-11 rounded-xl bg-gradient-to-br from-indigo-50 to-violet-100 dark:from-indigo-950/70 dark:to-violet-900/50 flex items-center justify-center text-indigo-600 font-black text-lg overflow-hidden border border-indigo-100 dark:border-indigo-900 shrink-0 shadow-inner">
                   <img
                     v-if="getCreatorAvatar(c)"
                     :src="getCreatorAvatar(c)"
@@ -2414,16 +2414,11 @@ function formatTime(timestamp: number) {
 
             <!-- Attached Channels Grouped by Platform -->
             <div class="space-y-3 pt-2 border-t border-slate-100 dark:border-slate-800">
-              <div class="flex items-center justify-between text-xs text-slate-500">
-                <span class="font-medium">
-                  归集账号 ({{ channels.filter(ch => ch.creatorId === c.id).length }} 个账号，涵盖 {{ Object.keys(getCreatorGroupedChannels(c.id)).length }} 个平台)
-                </span>
-                <button
-                  @click="openAddModal('channel', c)"
-                  class="text-indigo-600 hover:text-indigo-700 dark:text-indigo-400 font-semibold flex items-center gap-1 cursor-pointer bg-indigo-50 dark:bg-indigo-950/60 px-2 py-1 rounded-lg border border-indigo-100 dark:border-indigo-900 transition-colors"
-                >
+              <div class="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400 pb-1">
+                <span class="font-semibold text-slate-700 dark:text-slate-300">已绑定账号</span>
+                <button @click="openAddModal('channel', c)" class="text-indigo-600 hover:text-indigo-700 dark:text-indigo-400 font-semibold flex items-center gap-1 cursor-pointer bg-indigo-50 dark:bg-indigo-950/60 px-2 py-1 rounded-lg border border-indigo-100 dark:border-indigo-900 transition-colors">
                   <Plus class="w-3 h-3" />
-                  <span>追加新账号 / 小号</span>
+                  <span>绑定账号</span>
                 </button>
               </div>
 
