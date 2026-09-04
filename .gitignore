@@ -1,0 +1,28 @@
+# Local and generated files
+.output/
+.wxt/
+node_modules/
+
+# Environment and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local databases, backups, logs, and exports
+*.db
+*.sqlite
+*.sqlite3
+*.local
+*.log
+*backup*.json
+*export*.json
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

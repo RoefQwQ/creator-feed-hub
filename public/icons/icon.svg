@@ -1,0 +1,36 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="100%" height="100%">
+  <defs>
+    <linearGradient id="cfh-grad" x1="15%" y1="15%" x2="85%" y2="85%">
+      <stop offset="0%" stop-color="#4F46E5" />
+      <stop offset="48%" stop-color="#7C3AED" />
+      <stop offset="100%" stop-color="#DB2777" />
+    </linearGradient>
+    <linearGradient id="sheen" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.35" />
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0" />
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="3" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+  <!-- Squircle Base -->
+  <rect x="6" y="6" width="116" height="116" rx="28" fill="url(#cfh-grad)" />
+  <!-- Gloss Sheen -->
+  <path d="M 34 6 L 94 6 C 112 6 122 16 122 34 L 122 56 C 100 66 28 66 6 56 L 6 34 C 6 16 16 6 34 6 Z" fill="url(#sheen)" />
+  
+  <!-- Outer Broadcast Feed Arc (Upper Right) -->
+  <path d="M 68 34 A 36 36 0 0 1 100 66" fill="none" stroke="#FFFFFF" stroke-width="6.5" stroke-linecap="round" opacity="0.9" />
+  
+  <!-- Outer Broadcast Feed Arc (Lower Left) -->
+  <path d="M 28 62 A 36 36 0 0 0 60 94" fill="none" stroke="#FFFFFF" stroke-width="6.5" stroke-linecap="round" opacity="0.9" />
+
+  <!-- Multi-platform Signal Nodes -->
+  <circle cx="28" cy="42" r="5.5" fill="#FFFFFF" opacity="0.9" />
+  <circle cx="100" cy="86" r="5.5" fill="#FFFFFF" opacity="0.9" />
+  <circle cx="96" cy="32" r="4" fill="#FFFFFF" opacity="0.85" />
+
+  <!-- Central Radiant Star / Beacon -->
+  <path d="M 64 28 Q 64 64 100 64 Q 64 64 64 100 Q 64 64 28 64 Q 64 64 64 28 Z" fill="#FFFFFF" filter="url(#glow)" />
+  <circle cx="64" cy="64" r="5" fill="#FEF08A" />
+</svg>
