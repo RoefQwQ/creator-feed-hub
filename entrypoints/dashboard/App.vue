@@ -64,6 +64,7 @@ import {
   Edit3,
   ImageOff
 } from 'lucide-vue-next';
+import PostCard from './components/PostCard.vue';
 
 // State
 const activeTab = ref<'feed' | 'creators' | 'bookmarks' | 'settings'>('feed');
@@ -1901,219 +1902,17 @@ function formatTime(timestamp: number) {
               :key="'feed-col-' + colIdx"
               class="flex-1 flex flex-col gap-4 xl:gap-5 min-w-0"
             >
-            <article
-              v-for="post in colPosts"
-              :key="post.id"
-              @click="markPostRead(post)"
-              :class="post.isRead ? '' : 'ring-1 ring-indigo-300 dark:ring-indigo-700'"
-            >
-              <!-- Card Header -->
-              <div class="p-4 border-b border-slate-100 dark:border-slate-800/60 flex items-center justify-between">
-                <div class="flex items-center gap-2.5 min-w-0">
-                  <!-- Creator Avatar -->
-                  <div class="w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-800 shrink-0 flex items-center justify-center text-xs font-bold text-indigo-600 overflow-hidden border border-slate-200 dark:border-slate-700">
-                    <img
-                      v-if="getPostAuthorAvatar(post)"
-                      :src="getPostAuthorAvatar(post)"
-                      referrerpolicy="no-referrer"
-                      class="w-full h-full object-cover"
-                      @error="handleAvatarError(getPostAuthorAvatar(post))"
-                    />
-                    <span v-else>{{ (creators.find(c => c.id === post.creatorId)?.name || 'C').slice(0, 1) }}</span>
-                  </div>
-                  <div class="min-w-0">
-                    <div class="flex items-center gap-1.5 min-w-0">
-                      <h4 class="font-bold text-xs text-slate-900 dark:text-white leading-tight truncate">
-                        {{ creators.find(c => c.id === post.creatorId)?.name || '未知博主' }}
-                      </h4>
-                      <!-- Account Role / Sub-account Tag -->
-                      <span
-                        v-if="post.channelLabel || channels.find(ch => ch.id === post.channelId)?.label"
-                        class="px-1.5 py-0.2 rounded text-[9px] font-medium bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200/80 dark:border-slate-700/80 shrink-0"
-                      >
-                        {{ post.channelLabel || channels.find(ch => ch.id === post.channelId)?.label }}
-                      </span>
-                    </div>
-                    <div class="flex items-center gap-1.5 text-[10px] text-slate-400 mt-0.5 min-w-0">
-                      <span :class="PLATFORM_REGISTRY[post.platform]?.badgeBg || 'bg-slate-100 text-slate-700 border-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700'" class="px-1.5 py-0.2 rounded text-[9px] font-semibold border shrink-0">
-                        {{ PLATFORM_REGISTRY[post.platform]?.name || post.platform }}
-                      </span>
-                      <span
-                        v-if="isRepostPost(post)"
-                        class="px-1.5 py-0.2 rounded text-[9px] font-medium bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-800 shrink-0 flex items-center gap-0.5"
-                        title="该条动态为转发或转推内容"
-                      >
-                        <Repeat2 class="w-2.5 h-2.5" />
-                        <span>转发</span>
-                      </span>
-                      <span class="truncate max-w-[100px] text-slate-500 dark:text-slate-400" :title="channels.find(ch => ch.id === post.channelId)?.displayName">
-                        @{{ channels.find(ch => ch.id === post.channelId)?.displayName || channels.find(ch => ch.id === post.channelId)?.accountId || post.platform }}
-                      </span>
-                      <span>•</span>
-                      <span class="flex items-center gap-0.5 shrink-0">
-                        <Clock class="w-2.5 h-2.5" />
-                        {{ formatTime(post.publishedAt) }}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- Card Header Actions -->
-                <div class="flex items-center gap-1 shrink-0">
-                  <!-- Bookmark Button -->
-                  <button
-                    type="button"
-                    @click.stop="toggleBookmarkPost(post)"
-                    :title="post.isBookmarked ? '取消收藏' : '收藏这条动态'"
-                    class="p-1.5 rounded-lg transition-colors cursor-pointer"
-                    :class="post.isBookmarked ? 'text-amber-500 bg-amber-50 dark:bg-amber-950/60 hover:bg-amber-100 dark:hover:bg-amber-900/60' : 'text-slate-400 hover:text-amber-500 hover:bg-slate-100 dark:hover:bg-slate-800'"
-                  >
-                    <Bookmark class="w-3.5 h-3.5" :class="{ 'fill-amber-500 text-amber-500': post.isBookmarked }" />
-                  </button>
-
-                  <!-- Open Link -->
-                  <a
-                    :href="post.originalUrl"
-                    target="_blank"
-                    title="在新标签页中打开原帖"
-                    class="text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors shrink-0"
-                  >
-                    <ExternalLink class="w-3.5 h-3.5" />
-                  </a>
-                </div>
-              </div>
-
-              <!-- Card Body Content -->
-              <div class="p-4 flex-1 space-y-3">
-                <h5 v-if="post.title" class="font-bold text-sm text-slate-900 dark:text-white leading-snug line-clamp-2">
-                  {{ post.title }}
-                </h5>
-                <p v-if="post.content" class="text-xs text-slate-600 dark:text-slate-300 line-clamp-4 whitespace-pre-wrap leading-relaxed">
-                  {{ post.content }}
-                </p>
-
-                <!-- Media Gallery (Images & Videos) -->
-                <div v-if="post.mediaList && post.mediaList.length > 0" class="pt-1">
-
-                  <!-- Video Card -->
-                  <div
-                    v-if="post.mediaList.length === 1 && post.mediaList[0].type === 'video'"
-                    @click="lightboxMedia = { url: post.mediaList[0].previewUrl, originalUrl: post.originalUrl, type: 'video', title: post.title }"
-                    class="relative aspect-video rounded-xl overflow-hidden bg-slate-900 cursor-pointer group flex items-center justify-center border border-slate-200 dark:border-slate-800 shadow-xs"
-                  >
-                    <img
-                      :src="toSecureMediaUrl(post.mediaList[0].previewUrl)"
-                      referrerpolicy="no-referrer"
-                      class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300 opacity-90"
-                      loading="lazy"
-                    />
-                    <div class="absolute inset-0 bg-black/25 flex items-center justify-center group-hover:bg-black/10 transition-colors">
-                      <div class="w-11 h-11 rounded-full bg-white/30 backdrop-blur-md flex items-center justify-center text-white shadow-lg group-hover:scale-110 transition-transform">
-                        <Film class="w-5 h-5 fill-white" />
-                      </div>
-                    </div>
-                  </div>
-
-                  <!-- Case 3: Pixiv Vertical or High-Res Single Illustration -->
-                  <div
-                    v-else-if="post.mediaList.length === 1 && post.platform === 'pixiv'"
-                    @click="lightboxMedia = { url: post.mediaList[0].previewUrl, originalUrl: post.originalUrl, type: 'image', title: post.title }"
-                    class="relative max-h-[460px] rounded-xl overflow-hidden bg-slate-100 dark:bg-slate-800/80 cursor-zoom-in group flex items-center justify-center border border-slate-200 dark:border-slate-800"
-                  >
-                    <img
-                      :src="toSecureMediaUrl(post.mediaList[0].previewUrl)"
-                      referrerpolicy="no-referrer"
-                      class="w-full h-full max-h-[460px] object-contain group-hover:scale-102 transition-transform duration-200"
-                      loading="lazy"
-                    />
-                  </div>
-
-                  <!-- Case 4: General Single Image (Fantia, Twitter, Xiaohongshu 1-pic) -->
-                  <div
-                    v-else-if="post.mediaList.length === 1"
-                    @click="lightboxMedia = { url: post.mediaList[0].previewUrl, originalUrl: post.originalUrl, type: 'image', title: post.title }"
-                    class="relative max-h-[460px] rounded-xl overflow-hidden bg-slate-100 dark:bg-slate-800 cursor-zoom-in group flex items-center justify-center border border-slate-200 dark:border-slate-800"
-                  >
-                    <img
-                      :src="toSecureMediaUrl(post.mediaList[0].previewUrl)"
-                      referrerpolicy="no-referrer"
-                      class="w-full h-full max-h-[460px] object-cover group-hover:scale-103 transition-transform duration-200"
-                      loading="lazy"
-                    />
-                  </div>
-
-                  <!-- Case 5: 2 Images Layout (Side by side) -->
-                  <div v-else-if="post.mediaList.length === 2" class="grid grid-cols-2 gap-2 aspect-[16/11]">
-                    <div
-                      v-for="(m, idx) in post.mediaList"
-                      :key="idx"
-                      @click="lightboxMedia = { url: m.originalUrl || m.previewUrl, originalUrl: post.originalUrl, type: m.type, title: post.title }"
-                      class="relative rounded-lg overflow-hidden bg-slate-100 dark:bg-slate-800 cursor-zoom-in group border border-slate-200/50 dark:border-slate-700/50"
-                    >
-                      <img
-                        :src="toSecureMediaUrl(m.previewUrl)"
-                        referrerpolicy="no-referrer"
-                        class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
-                        loading="lazy"
-                      />
-                    </div>
-                  </div>
-
-                  <!-- Case 6: 3 or 4 Images Grid (Twitter classic 2x2 or 3-col) -->
-                  <div v-else-if="post.mediaList.length <= 4" class="grid grid-cols-2 gap-1.5 aspect-square">
-                    <div
-                      v-for="(m, idx) in post.mediaList"
-                      :key="idx"
-                      @click="lightboxMedia = { url: m.originalUrl || m.previewUrl, originalUrl: post.originalUrl, type: m.type, title: post.title }"
-                      class="relative rounded-lg overflow-hidden bg-slate-100 dark:bg-slate-800 cursor-zoom-in group border border-slate-200/50 dark:border-slate-700/50"
-                    >
-                      <img
-                        :src="toSecureMediaUrl(m.previewUrl)"
-                        referrerpolicy="no-referrer"
-                        class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
-                        loading="lazy"
-                      />
-                    </div>
-                  </div>
-
-                  <!-- Case 7: 5+ Multi-image compact gallery -->
-                  <div v-else class="grid grid-cols-3 gap-1.5">
-                    <div
-                      v-for="(m, idx) in post.mediaList.slice(0, 6)"
-                      :key="idx"
-                      @click="lightboxMedia = { url: m.originalUrl || m.previewUrl, originalUrl: post.originalUrl, type: m.type, title: post.title }"
-                      class="relative aspect-square rounded-lg overflow-hidden bg-slate-100 dark:bg-slate-800 cursor-zoom-in group border border-slate-200/50 dark:border-slate-700/50"
-                    >
-                      <img
-                        :src="toSecureMediaUrl(m.previewUrl)"
-                        referrerpolicy="no-referrer"
-                        class="w-full h-full object-cover group-hover:scale-108 transition-transform duration-200"
-                        loading="lazy"
-                      />
-                      <div
-                        v-if="idx === 5 && post.mediaList.length > 6"
-                        class="absolute inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center text-white font-bold text-xs"
-                      >
-                        +{{ post.mediaList.length - 6 }}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <!-- Card Footer -->
-              <div class="px-4 py-2.5 bg-slate-50/80 dark:bg-slate-850/60 border-t border-slate-100 dark:border-slate-800 text-[11px] text-slate-400 flex items-center justify-between">
-                <span>同步于 {{ formatTime(post.fetchedAt) }}</span>
-                <a
-                  :href="post.originalUrl"
-                  target="_blank"
-                  class="flex items-center gap-1 text-indigo-600 hover:text-indigo-700 dark:text-indigo-400 font-medium transition-colors"
-                >
-                  <span>直达原帖</span>
-                  <ChevronRight class="w-3 h-3" />
-                </a>
-              </div>
-            </article>
+              <PostCard
+                v-for="post in colPosts"
+                :key="post.id"
+                :post="post"
+                :creators="creators"
+                :channels="channels"
+                @bookmark="toggleBookmarkPost"
+                @read="markPostRead"
+                @media="lightboxMedia = $event"
+                @avatar-error="handleAvatarError"
+              />
             </div>
           </div>
 
@@ -2855,192 +2654,18 @@ function formatTime(timestamp: number) {
               :key="'bm-col-' + colIdx"
               class="flex-1 flex flex-col gap-4 xl:gap-5 min-w-0"
             >
-            <article
-              v-for="post in colPosts"
-              :key="'bm-' + post.id"
-              class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 overflow-hidden shadow-xs hover:shadow-md transition-all flex flex-col ring-1 ring-amber-500/20"
-            >
-              <!-- Card Header -->
-              <div class="p-4 border-b border-slate-100 dark:border-slate-800/60 flex items-center justify-between">
-                <div class="flex items-center gap-2.5 min-w-0">
-                  <div class="w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-800 shrink-0 flex items-center justify-center text-xs font-bold text-indigo-600 overflow-hidden border border-slate-200 dark:border-slate-700">
-                    <img
-                      v-if="getPostAuthorAvatar(post)"
-                      :src="getPostAuthorAvatar(post)"
-                      referrerpolicy="no-referrer"
-                      class="w-full h-full object-cover"
-                      @error="handleAvatarError(getPostAuthorAvatar(post))"
-                    />
-                    <span v-else>{{ (creators.find(c => c.id === post.creatorId)?.name || 'C').slice(0, 1) }}</span>
-                  </div>
-                  <div class="min-w-0">
-                    <div class="flex items-center gap-1.5 min-w-0">
-                      <h4 class="font-bold text-xs text-slate-900 dark:text-white leading-tight truncate">
-                        {{ creators.find(c => c.id === post.creatorId)?.name || '未知博主' }}
-                      </h4>
-                      <span
-                        v-if="post.channelLabel || channels.find(ch => ch.id === post.channelId)?.label"
-                        class="px-1.5 py-0.2 rounded text-[9px] font-medium bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 border border-slate-200/80 dark:border-slate-700/80 shrink-0"
-                      >
-                        {{ post.channelLabel || channels.find(ch => ch.id === post.channelId)?.label }}
-                      </span>
-                    </div>
-                    <div class="flex items-center gap-1.5 text-[10px] text-slate-400 mt-0.5 min-w-0">
-                      <span :class="PLATFORM_REGISTRY[post.platform]?.badgeBg || 'bg-slate-100 text-slate-700 border-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700'" class="px-1.5 py-0.2 rounded text-[9px] font-semibold border shrink-0">
-                        {{ PLATFORM_REGISTRY[post.platform]?.name || post.platform }}
-                      </span>
-                      <span class="truncate max-w-[100px] text-slate-500 dark:text-slate-400">
-                        @{{ channels.find(ch => ch.id === post.channelId)?.displayName || channels.find(ch => ch.id === post.channelId)?.accountId || post.platform }}
-                      </span>
-                      <span>•</span>
-                      <span class="flex items-center gap-0.5 shrink-0">
-                        <Clock class="w-2.5 h-2.5" />
-                        {{ formatTime(post.publishedAt) }}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- Card Header Actions -->
-                <div class="flex items-center gap-1 shrink-0">
-                  <button
-                    type="button"
-                    @click.stop="toggleBookmarkPost(post)"
-                    title="取消收藏"
-                    class="p-1.5 rounded-lg text-amber-500 bg-amber-50 dark:bg-amber-950/60 hover:bg-rose-50 dark:hover:bg-rose-950/60 hover:text-rose-600 transition-colors cursor-pointer"
-                  >
-                    <Bookmark class="w-3.5 h-3.5 fill-amber-500" />
-                  </button>
-                  <a
-                    :href="post.originalUrl"
-                    target="_blank"
-                    title="在新标签页中打开原帖"
-                    class="text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400 p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors shrink-0"
-                  >
-                    <ExternalLink class="w-3.5 h-3.5" />
-                  </a>
-                </div>
-              </div>
-
-              <!-- Card Body Content -->
-              <div class="p-4 flex-1 space-y-3">
-                <h5 v-if="post.title" class="font-bold text-sm text-slate-900 dark:text-white leading-snug line-clamp-2">
-                  {{ post.title }}
-                </h5>
-                <p v-if="post.content" class="text-xs text-slate-600 dark:text-slate-300 line-clamp-4 whitespace-pre-wrap leading-relaxed">
-                  {{ post.content }}
-                </p>
-
-                <!-- Media Gallery -->
-                <div v-if="post.mediaList && post.mediaList.length > 0" class="pt-1">
-                  <!-- Video Card -->
-                  <div
-                    v-if="post.mediaList.length === 1 && post.mediaList[0].type === 'video'"
-                    @click="lightboxMedia = { url: post.mediaList[0].previewUrl, originalUrl: post.originalUrl, type: 'video', title: post.title }"
-                    class="relative aspect-video rounded-xl overflow-hidden bg-slate-900 cursor-pointer group flex items-center justify-center border border-slate-200 dark:border-slate-800 shadow-xs"
-                  >
-                    <img
-                      :src="toSecureMediaUrl(post.mediaList[0].previewUrl)"
-                      referrerpolicy="no-referrer"
-                      class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300 opacity-90"
-                      loading="lazy"
-                    />
-                    <div class="absolute inset-0 bg-black/25 flex items-center justify-center group-hover:bg-black/10 transition-colors">
-                      <div class="w-11 h-11 rounded-full bg-white/30 backdrop-blur-md flex items-center justify-center text-white shadow-lg group-hover:scale-110 transition-transform">
-                        <Film class="w-5 h-5 fill-white" />
-                      </div>
-                    </div>
-                  </div>
-
-                  <!-- Single Image -->
-                  <div
-                    v-else-if="post.mediaList.length === 1"
-                    @click="lightboxMedia = { url: post.mediaList[0].previewUrl, originalUrl: post.originalUrl, type: 'image', title: post.title }"
-                    class="relative max-h-[460px] rounded-xl overflow-hidden bg-slate-100 dark:bg-slate-800 cursor-zoom-in group flex items-center justify-center border border-slate-200 dark:border-slate-800"
-                  >
-                    <img
-                      :src="toSecureMediaUrl(post.mediaList[0].previewUrl)"
-                      referrerpolicy="no-referrer"
-                      class="w-full h-full max-h-[460px] object-cover group-hover:scale-103 transition-transform duration-200"
-                      loading="lazy"
-                    />
-                  </div>
-
-                  <!-- 2 Images Layout -->
-                  <div v-else-if="post.mediaList.length === 2" class="grid grid-cols-2 gap-2 aspect-[16/11]">
-                    <div
-                      v-for="(m, idx) in post.mediaList"
-                      :key="'bm-img2-' + idx"
-                      @click="lightboxMedia = { url: m.originalUrl || m.previewUrl, originalUrl: post.originalUrl, type: m.type, title: post.title }"
-                      class="relative rounded-lg overflow-hidden bg-slate-100 dark:bg-slate-800 cursor-zoom-in group border border-slate-200/50 dark:border-slate-700/50"
-                    >
-                      <img
-                        :src="toSecureMediaUrl(m.previewUrl)"
-                        referrerpolicy="no-referrer"
-                        class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
-                        loading="lazy"
-                      />
-                    </div>
-                  </div>
-
-                  <!-- 3 or 4 Images Grid -->
-                  <div v-else-if="post.mediaList.length <= 4" class="grid grid-cols-2 gap-1.5 aspect-square">
-                    <div
-                      v-for="(m, idx) in post.mediaList"
-                      :key="'bm-img4-' + idx"
-                      @click="lightboxMedia = { url: m.originalUrl || m.previewUrl, originalUrl: post.originalUrl, type: m.type, title: post.title }"
-                      class="relative rounded-lg overflow-hidden bg-slate-100 dark:bg-slate-800 cursor-zoom-in group border border-slate-200/50 dark:border-slate-700/50"
-                    >
-                      <img
-                        :src="toSecureMediaUrl(m.previewUrl)"
-                        referrerpolicy="no-referrer"
-                        class="w-full h-full object-cover group-hover:scale-105 transition-transform duration-200"
-                        loading="lazy"
-                      />
-                    </div>
-                  </div>
-
-                  <!-- 5+ Multi-image compact gallery -->
-                  <div v-else class="grid grid-cols-3 gap-1.5">
-                    <div
-                      v-for="(m, idx) in post.mediaList.slice(0, 6)"
-                      :key="'bm-img6-' + idx"
-                      @click="lightboxMedia = { url: m.originalUrl || m.previewUrl, originalUrl: post.originalUrl, type: m.type, title: post.title }"
-                      class="relative aspect-square rounded-lg overflow-hidden bg-slate-100 dark:bg-slate-800 cursor-zoom-in group border border-slate-200/50 dark:border-slate-700/50"
-                    >
-                      <img
-                        :src="toSecureMediaUrl(m.previewUrl)"
-                        referrerpolicy="no-referrer"
-                        class="w-full h-full object-cover group-hover:scale-108 transition-transform duration-200"
-                        loading="lazy"
-                      />
-                      <div
-                        v-if="idx === 5 && post.mediaList.length > 6"
-                        class="absolute inset-0 bg-black/60 backdrop-blur-xs flex items-center justify-center text-white font-bold text-xs"
-                      >
-                        +{{ post.mediaList.length - 6 }}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <!-- Card Footer -->
-              <div class="px-4 py-2.5 bg-slate-50/80 dark:bg-slate-850/60 border-t border-slate-100 dark:border-slate-800 text-[11px] text-slate-400 flex items-center justify-between">
-                <span class="flex items-center gap-1 text-amber-600 dark:text-amber-400 font-medium">
-                  <Bookmark class="w-3 h-3 fill-amber-500 text-amber-500" />
-                  <span>已收藏</span>
-                </span>
-                <a
-                  :href="post.originalUrl"
-                  target="_blank"
-                  class="flex items-center gap-1 text-indigo-600 hover:text-indigo-700 dark:text-indigo-400 font-medium transition-colors"
-                >
-                  <span>直达原帖</span>
-                  <ChevronRight class="w-3 h-3" />
-                </a>
-              </div>
-            </article>
+              <PostCard
+                v-for="post in colPosts"
+                :key="'bm-' + post.id"
+                :post="post"
+                :creators="creators"
+                :channels="channels"
+                bookmarked
+                @bookmark="toggleBookmarkPost"
+                @read="markPostRead"
+                @media="lightboxMedia = $event"
+                @avatar-error="handleAvatarError"
+              />
             </div>
           </div>
         </div>
