@@ -127,8 +127,9 @@ async function triggerRplaySync() {
 /**
  * Executes lightweight in-page DOM script to extract author real name & avatar from current active tab
  */
-async function extractActiveTabAuthorMeta(tabId: number) {
+async function extractActiveTabAuthorMeta(tabId: number, tabUrl?: string) {
   if (typeof chrome === 'undefined' || !chrome.scripting?.executeScript) return;
+  if (!tabUrl || /^(chrome|edge|about|devtools):/i.test(tabUrl)) return;
   try {
     const results = await chrome.scripting.executeScript({
       target: { tabId },
@@ -241,7 +242,7 @@ onMounted(async () => {
         await handleUrl(tab.url);
 
         if (tab.id) {
-          await extractActiveTabAuthorMeta(tab.id);
+          await extractActiveTabAuthorMeta(tab.id, tab.url);
         }
 
         if (tab.url.includes('rplay.live')) {

@@ -56,9 +56,17 @@ export async function bgFetch(url: string, options: RequestInit = {}): Promise<H
         return resp;
       }
     } catch (e) {
-      console.warn('[bgFetch] Delegate failed, fallback to direct:', e);
+      console.warn('[bgFetch] Delegate failed:', e);
+      return { ok: false, status: 0, data: '', error: '后台请求服务未响应，请重新加载扩展后重试' };
     }
   }
+
+  // Only use direct fetch outside an extension context (for local unit/smoke use).
+  if (typeof chrome !== 'undefined') {
+    return { ok: false, status: 0, data: '', error: '扩展后台请求不可用' };
+  }
+
+  // Direct fetch fallback for non-extension callers.
 
   // 2. Direct fetch fallback
   try {
