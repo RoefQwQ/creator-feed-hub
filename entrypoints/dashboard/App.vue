@@ -65,7 +65,7 @@ import {
   ImageOff
 } from 'lucide-vue-next';
 import PostCard from './components/PostCard.vue';
-import DashboardSection from './components/DashboardSection.vue';
+import MediaLightbox from './components/MediaLightbox.vue';
 
 // State
 const activeTab = ref<'feed' | 'creators' | 'bookmarks' | 'settings'>('feed');
@@ -1705,8 +1705,7 @@ function formatTime(timestamp: number) {
     <!-- Main Container -->
     <main class="flex-1 w-full max-w-[98%] 2xl:max-w-[96%] mx-auto px-3 sm:px-6 py-5">
 
-      <!-- ==================== VIEW 1: AGGREGATED FEED (3-COLUMN DASHBOARD) ==================== -->
-      <DashboardSection :active="activeTab === 'feed'" class-name="flex flex-col lg:flex-row items-start gap-4 xl:gap-5">
+      <section v-if="activeTab === 'feed'" class="flex flex-col lg:flex-row items-start gap-4 xl:gap-5">
 
         <!-- 1. LEFT SIDEBAR: Platform, Tags & Filters Navigation -->
         <aside class="w-full lg:w-48 xl:w-52 shrink-0 space-y-3.5 lg:sticky lg:top-20">
@@ -2107,10 +2106,9 @@ function formatTime(timestamp: number) {
             </div>
           </div>
         </aside>
-      </DashboardSection>
+      </section>
 
-      <!-- ==================== VIEW 2: CREATOR MANAGEMENT ==================== -->
-      <DashboardSection :active="activeTab === 'creators'" class-name="space-y-6">
+      <section v-else-if="activeTab === 'creators'" class="space-y-6">
         <!-- Header & Action Toolbar -->
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
@@ -2547,10 +2545,9 @@ function formatTime(timestamp: number) {
             </div>
           </div>
         </div>
-      </DashboardSection>
+      </section>
 
-      <!-- ==================== VIEW 3: BOOKMARKS / FAVORITES ==================== -->
-      <DashboardSection :active="activeTab === 'bookmarks'" class-name="space-y-5">
+      <section v-else-if="activeTab === 'bookmarks'" class="space-y-5">
         <!-- Bookmarks Header & Filter Bar -->
         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div>
@@ -2670,10 +2667,9 @@ function formatTime(timestamp: number) {
             </div>
           </div>
         </div>
-      </DashboardSection>
+      </section>
 
-      <!-- ==================== VIEW 4: SETTINGS ==================== -->
-      <DashboardSection :active="activeTab === 'settings'" class-name="max-w-3xl mx-auto space-y-6">
+      <section v-else-if="activeTab === 'settings'" class="max-w-3xl mx-auto space-y-6">
         <!-- Security & Architecture Guarantee Banner -->
         <div class="p-5 bg-gradient-to-r from-indigo-900/10 to-violet-900/10 dark:from-indigo-950/50 dark:to-violet-950/50 border border-indigo-200 dark:border-indigo-800/60 rounded-2xl flex items-start gap-3">
           <ShieldCheck class="w-6 h-6 text-indigo-600 dark:text-indigo-400 shrink-0 mt-0.5" />
@@ -3015,7 +3011,7 @@ function formatTime(timestamp: number) {
             </div>
           </div>
         </div>
-      </DashboardSection>
+      </section>
     </main>
 
     <!-- Modal: Add Creator or Channel -->
@@ -3684,48 +3680,6 @@ function formatTime(timestamp: number) {
       </div>
     </div>
 
-    <!-- Enhanced Lightbox Modal with Key ESC and Original View -->
-    <div
-      v-if="lightboxMedia"
-      class="fixed inset-0 z-50 bg-black/92 backdrop-blur-md flex flex-col justify-between p-4 sm:p-6"
-    >
-      <!-- Top Lightbox Bar -->
-      <div class="flex items-center justify-between text-white/80">
-        <span class="text-xs truncate max-w-xl">{{ lightboxMedia.title || '媒体大图查看' }}</span>
-        <div class="flex items-center gap-3">
-          <a
-            v-if="lightboxMedia.originalUrl"
-            :href="lightboxMedia.originalUrl"
-            target="_blank"
-            class="flex items-center gap-1 text-xs text-indigo-400 hover:underline"
-          >
-            <span>访问原帖</span>
-            <ExternalLink class="w-3.5 h-3.5" />
-          </a>
-          <button
-            @click="lightboxMedia = null"
-            class="p-1.5 rounded-full hover:bg-white/10 text-white cursor-pointer"
-            title="按 ESC 或点击关闭"
-          >
-            <X class="w-5 h-5" />
-          </button>
-        </div>
-      </div>
-
-      <!-- Center Media View -->
-      <div class="flex-1 flex items-center justify-center p-2 min-h-0" @click="lightboxMedia = null">
-        <img
-          :src="toSecureMediaUrl(lightboxMedia.url)"
-          referrerpolicy="no-referrer"
-          class="max-w-full max-h-[82vh] object-contain rounded-xl shadow-2xl transition-all select-none"
-          @click.stop
-        />
-      </div>
-
-      <!-- Bottom Hint -->
-      <div class="text-center text-[11px] text-white/40">
-        点击遮罩或按 ESC 键即可退出大图模式
-      </div>
-    </div>
+    <MediaLightbox v-if="lightboxMedia" :media="lightboxMedia" @close="lightboxMedia = null" />
   </div>
 </template>
