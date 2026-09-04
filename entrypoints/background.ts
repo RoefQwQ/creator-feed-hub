@@ -47,9 +47,6 @@ async function updateUnreadBadge() {
   }
 }
 
-  chrome.runtime.onInstalled.addListener(() => {
-    setupDeclarativeNetRules();
-  });
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.type === 'OPEN_DASHBOARD') {

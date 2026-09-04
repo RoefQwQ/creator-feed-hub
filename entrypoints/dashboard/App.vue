@@ -716,8 +716,9 @@ async function handleRefreshCreator(creatorId: string) {
   }
   const results = await updateCreator(creatorId, settings.value.itemsPerFetch, { onlyOriginal: hideReposts.value });
   await reloadData();
-  const totalPosts = results.reduce((acc, r) => acc + (r.posts?.length || 0), 0);
-  const errors = results.filter(r => r.error).map(r => r.error);
+  const safeResults = Array.isArray(results) ? results : [];
+  const totalPosts = safeResults.reduce((acc, r) => acc + (r.posts?.length || 0), 0);
+  const errors = safeResults.filter(r => r.error).map(r => r.error);
   if (errors.length > 0 && totalPosts === 0) {
     alert(`【同步提示 - ${creator?.name || '创作者'}】\n${errors.join('\n')}`);
   } else {
