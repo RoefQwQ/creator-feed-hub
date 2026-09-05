@@ -1,83 +1,234 @@
-# Creator Feed Hub - 跨平台创作者动态追踪展台
+# Creator Feed Hub
 
-基于现代化浏览器扩展（Manifest V3）与全屏展示台构建的独立追踪工具。专为高品质订阅与创作者多平台归集设计。
+一个基于 WXT、Vue 3 和 Manifest V3 的本地优先创作者动态聚合扩展。
 
----
+它把多个平台的创作者账号归集到同一份关注列表中，在浏览器内保存动态、收藏、标签和同步状态，提供统一的动态流与账号管理界面。
 
-## 🌟 核心特性
+## 特性
 
-1. **零 Cookie 输入 (天然利用浏览器会话)**：
-   - 无需手动抓包复制敏感的 `_session_id`、`auth_token`、`SESSDATA`。
-   - 只要当前浏览器登录了对应网站，插件自动在后台携带 Cookie 进行无感抓取。
-2. **多平台同一博主归集 (1对多关联)**：
-   - 一个创作者（例如：爱丽丝 / Alice）名下可同时绑定 TA 在 B站、YouTube、Twitter/X、Fantia、Pixiv、Rplay、Withny、抖音 等平台的多个账号。
-3. **被动更新式设计 (点击即查，零后台冗余请求)**：
-   - 告别 24 小时不间断的无意义轮询与封号风险。
-   - 提供「检查全部更新」或「单独刷新某位博主」，仅在你有需求时触发精准增量更新。
-4. **一键快速关注捕获 (Popup)**：
-   - 在任意受支持平台浏览创作者主页时，点击浏览器右上角插件图标，秒级识别博主信息，一键入库或关联至已有博主。
-5. **全屏独立展台 (Dashboard)**：
-   - **聚合动态瀑布流 (Timeline)**：统一卡片式排版，多图画廊灯箱查看，自带 `no-referrer` 防盗链绕过，外链原帖直达。
-   - **博主档案管理库 (Creators)**：直观查看每个博主绑定的全部渠道及更新状态，支持单独针对该博主进行更新。
-   - **设置中心 (Settings)**：平台登录态一览、一键全量 JSON 备份与还原、请求安全延迟设置。
+- 多平台账号归集：Bilibili、YouTube、X/Twitter、Pixiv、Fantia、Rplay、Withny、小红书、微博和 RSS。
+- Popup 快速关注：从当前创作者页面识别链接、昵称和头像，创建创作者或绑定已有创作者。
+- Dashboard 动态流：平台筛选、标签包含/排除、转发过滤、纯文字过滤、搜索、瀑布流、收藏和灯箱预览。
+- 关注管理：按创作者查看绑定账号，支持账号角色、单账号同步、深度历史回溯、批量同步和批量删除。
+- 本地优先：创作者、账号、动态和设置保存在浏览器 IndexedDB；扩展不依赖自建后端或遥测服务。
+- 会话复用：按浏览器扩展权限使用对应平台的登录 Cookie；Rplay 会话可从打开的页面同步到 Chrome Extension Storage。
+- 同步保护：超时、冷却、请求间隔、增量水位、历史游标和收藏保护。
+- 自动同步：后台通过 `chrome.alarms` 每 30 分钟执行一次同步，并更新未读角标。
+- 备份迁移：支持导出和导入 JSON 数据。
 
----
+## 快速开始
 
-## 🚀 如何安装与使用
+### 环境
 
-### 1. 构建扩展产物
-确保本地处于 `creator-feed-hub/` 目录下：
+- Node.js 18+
+- npm
+- Chrome、Edge 或其他 Chromium 浏览器
+
+### 安装依赖
+
+```bash
+npm install
+```
+
+### 开发模式
+
+```bash
+npm run dev
+```
+
+WXT 会启动开发构建。根据终端输出加载对应的开发扩展目录。
+
+### 生产构建
+
 ```bash
 npm run build
 ```
-构建产物将自动生成在 `creator-feed-hub/.output/chrome-mv3/` 目录下。
 
-### 2. 在浏览器中加载
-1. 打开 Chrome、Edge 或其他 Chromium 内核浏览器。
-2. 在地址栏输入 `chrome://extensions/`（Edge 输入 `edge://extensions/`）。
-3. 开启右上角的 **「开发者模式」 (Developer mode)**。
-4. 点击左上角 **「加载已解压的扩展程序」 (Load unpacked)**。
-5. 选中目录：`e:\Claude Code\ddbug\creator-feed-hub\.output\chrome-mv3`。
+产物位于：
 
-### 3. 开始使用
-* **打开展台**：点击浏览器右上角插件图标，在弹窗中点击「打开全屏展台」，即可进入独立大屏 Dashboard。
-* **一键添加关注**：在 B站、Twitter 或 Fantia 博主主页点击插件图标，即可一键建立档案或关联到已有博主。
-* **体验样例数据**：在展台的「设置中心」可点击「导入演示博主样例」，立即体验完整更新与交互功能。
-
----
-
-## 📁 目录架构说明
-
+```text
+.output/chrome-mv3/
 ```
+
+加载方式：
+
+1. 打开 `chrome://extensions/` 或 `edge://extensions/`。
+2. 开启“开发者模式”。
+3. 点击“加载已解压的扩展程序”。
+4. 选择 `.output/chrome-mv3/`。
+5. 代码更新后重新执行构建，并在扩展管理页点击“重新加载”。
+
+打包 ZIP：
+
+```bash
+npm run zip
+```
+
+## 使用流程
+
+1. 在支持的平台打开创作者主页。
+2. 点击浏览器工具栏中的 Creator Feed Hub 图标。
+3. 在 Popup 中确认识别结果，选择“新建创作者”或绑定已有创作者。
+4. 打开 Dashboard，在“动态”页同步全部账号或单独刷新账号。
+5. 在“关注”页维护创作者、平台账号、角色和标签。
+6. 在“收藏”页查看长期保留的动态。
+7. 在“设置”页管理平台状态、同步参数、数据清理和 JSON 备份。
+
+## 数据与隐私
+
+项目采用本地优先设计：
+
+- 业务数据存储在扩展自己的 IndexedDB 数据库中。
+- 设置和部分会话凭证存储在 Chrome Extension Storage 中。
+- 网络请求由扩展适配器发起，必要时通过 Background Service Worker 代理以避开页面 CORS。
+- 源码仓库不包含用户的创作者数据、动态、Cookie、Token、数据库或备份文件。
+- 本仓库不配置远程 Git 推送之外的应用后端；GitHub 只存放项目源码和配置。
+
+扩展申请的敏感权限包括 `cookies`、`tabs`、`scripting`、`activeTab` 和平台 host permissions。它们用于读取登录状态、识别当前页面和执行平台适配器请求。安装扩展前应确认你信任该源码和权限范围。
+
+## 项目架构
+
+```mermaid
+flowchart TB
+  Popup[Popup Vue App] --> Parser[URL Parser]
+  Popup --> DB[(Dexie IndexedDB)]
+  Dashboard[Dashboard Vue App] --> DB
+  Dashboard --> Adapters[Adapter Dispatcher]
+  Adapters --> Platforms[Platform Adapters]
+  Adapters --> DB
+  Adapters --> HTTP[bgFetch]
+  HTTP --> Background[Background Service Worker]
+  Background --> Web[Platform APIs and Pages]
+  Background --> Badge[Unread Badge and Alarms]
+```
+
+### 目录
+
+```text
 creator-feed-hub/
-├── assets/
-│   └── main.css               # Tailwind CSS v4 样式层与滚动条美化
-├── entrypoints/
-│   ├── background.ts          # Manifest V3 后台服务脚本 (Service Worker)
-│   ├── popup/                 # 浏览器工具栏快捷弹窗 (一键捕获与绑定)
-│   │   ├── index.html
-│   │   ├── main.ts
-│   │   └── App.vue
-│   └── dashboard/             # 独立全屏展示台 (Dashboard)
-│       ├── index.html
-│       ├── main.ts
-│       └── App.vue
-├── src/
-│   ├── types/                 # 核心数据模型 (Creator, Channel, Post, Settings)
-│   ├── db/                    # Dexie.js (IndexedDB) 本地数据库持久化层
-│   ├── utils/
-│   │   └── urlParser.ts       # 8大主流与小众平台 URL 自动识别与解析器
-│   └── adapters/              # 各平台抓取适配器
-│       ├── bilibili.ts        # B站动态与视频 Web API 适配
-│       ├── youtube.ts         # YouTube 官方 RSS 解析
-│       ├── twitter.ts         # Twitter / X Syndication SSR 数据适配
-│       ├── fantia.ts          # Fantia 官方内部 REST JSON 适配
-│       ├── pixiv.ts           # Pixiv 创作者作品列表适配
-│       ├── rplay.ts           # Rplay 频道 API 适配
-│       ├── withny.ts          # Withny 动态 API 适配
-│       ├── douyin.ts          # 抖音 Web 列表适配
-│       └── index.ts           # 统一调度器与增量更新逻辑
-├── package.json
-├── tsconfig.json
-└── wxt.config.ts              # 扩展打包与权限配置
+├─ assets/
+│  └─ main.css                         # Tailwind CSS 入口和全局样式
+├─ entrypoints/
+│  ├─ background.ts                    # MV3 Service Worker、BG_FETCH、定时同步、徽标
+│  ├─ rplay-sync.content.ts            # Rplay 页面会话同步 content script
+│  ├─ popup/
+│  │  ├─ App.vue                       # 快速识别、创建和绑定账号
+│  │  ├─ index.html
+│  │  └─ main.ts
+│  └─ dashboard/
+│     ├─ App.vue                       # Dashboard 状态编排和页面容器
+│     ├─ components/
+│     │  ├─ PostCard.vue                # Feed/收藏共用动态卡片
+│     │  ├─ MediaLightbox.vue           # 媒体灯箱
+│     │  └─ DashboardSection.vue        # Dashboard 视图边界容器
+│     ├─ views/
+│     │  └─ FeedView.vue                # 预留的动态视图组件边界
+│     ├─ index.html
+│     └─ main.ts
+├─ src/
+│  ├─ types/index.ts                   # Platform、Creator、Channel、Post、Settings
+│  ├─ db/index.ts                       # Dexie 数据库、设置、统计、清理
+│  ├─ utils/
+│  │  ├─ http.ts                        # Background fetch 通信和请求封装
+│  │  └─ urlParser.ts                   # 平台主页、内容页和 RSS URL 解析
+│  └─ adapters/
+│     ├─ index.ts                       # 适配器注册、同步调度、超时和增量逻辑
+│     ├─ types.ts                       # PlatformAdapter、FetchResult、FetchOptions
+│     ├─ bilibili.ts
+│     ├─ twitter.ts
+│     ├─ youtube.ts
+│     ├─ pixiv.ts
+│     ├─ fantia.ts
+│     ├─ rplay.ts
+│     ├─ withny.ts
+│     ├─ xiaohongshu.ts
+│     ├─ weibo.ts
+│     └─ rss.ts
+├─ public/icons/                        # 扩展图标
+├─ package.json
+├─ tsconfig.json
+├─ wxt.config.ts                        # WXT、Manifest 和权限配置
+└─ .gitignore                            # 构建产物、数据库、凭证和备份忽略规则
 ```
+
+## 核心数据流
+
+### 添加创作者
+
+```text
+当前网页
+  → Popup tabs.query
+  → scripting.executeScript 识别页面信息
+  → urlParser.parseProfileUrl
+  → 用户确认新建或绑定
+  → Dexie creators/channels
+```
+
+对 `chrome://`、`edge://`、`about:` 和 `devtools:` 页面，Popup 会跳过 DOM 注入，因为浏览器禁止扩展脚本访问这些内部页面。
+
+### 同步动态
+
+```text
+Dashboard / 自动同步
+  → adapters.updateChannel
+  → 平台 adapter.fetchLatest
+  → bgFetch
+  → runtime.sendMessage(BG_FETCH)
+  → Background Service Worker fetch
+  → adapter 解析 FetchResult
+  → 增量过滤和去重
+  → Dexie posts.bulkPut
+  → Dashboard reloadData
+```
+
+适配器通过统一接口接入：
+
+```ts
+interface PlatformAdapter {
+  platform: string;
+  fetchLatest(channel: Channel, limit?: number, options?: FetchOptions): Promise<FetchResult>;
+  checkAuthStatus?(): Promise<{ loggedIn: boolean; username?: string }>;
+}
+```
+
+新增平台通常需要：
+
+1. 在 `src/adapters/` 新增适配器。
+2. 实现 `PlatformAdapter`。
+3. 在 `src/adapters/index.ts` 注册。
+4. 在 `src/types/index.ts` 添加平台元数据。
+5. 在 `wxt.config.ts` 增加必要的 host permission。
+6. 更新 URL 解析规则和 UI 平台状态逻辑。
+
+## 构建与排错
+
+如果扩展页面没有更新：
+
+```bash
+npm run build
+```
+
+然后到 `chrome://extensions/` 点击“重新加载”。
+
+如果看到旧的扩展错误记录，先在错误详情页点击“全部清除”，再重新操作。Chrome 内部页面上的脚本注入会被浏览器禁止；普通网站请求应统一通过 Background Service Worker 代理。
+
+## Git 开发约定
+
+本地构建目录、依赖目录、本地数据库、备份和凭证已加入 `.gitignore`。提交前检查：
+
+```bash
+git status --short --ignored
+git diff --check
+```
+
+提交后推送：
+
+```bash
+git add .
+git commit -m "描述变更"
+git push
+```
+
+## License
+
+当前项目未声明开源许可证。未经项目所有者授权，不应将其作为已授权开源项目分发。
