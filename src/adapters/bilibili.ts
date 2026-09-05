@@ -2,8 +2,12 @@ import type { Channel, Post } from '../types';
 import type { PlatformAdapter, FetchResult, FetchOptions } from './types';
 import { bgFetch } from '../utils/http';
 
+// Mirror the real site's UA. Bilibili risk-control rejects the default fetch UA.
+const BILI_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+
 /** Map Bilibili business error codes to a clear, user-facing message. */
-function biliCodeMessage(code: number, fallback?: string): string {
+function biliCodeMessage(code: number): string {
   switch (code) {
     case -101:
       return 'B站未登录或登录已过期，请检查登录状态';
@@ -14,7 +18,7 @@ function biliCodeMessage(code: number, fallback?: string): string {
     case -412:
       return 'B站请求被拦截（风控），请稍后重试';
     default:
-      return fallback || `B站接口异常 (code ${code})`;
+      return `B站接口异常 (code ${code})`;
   }
 }
 
@@ -41,6 +45,10 @@ export const bilibiliAdapter: PlatformAdapter = {
     // Remember non-zero business codes so a total-empty result reports the real cause.
     let lastDynamicCode: number | undefined;
     let lastMediaCode: number | undefined;
+    // Whether medialist responded with a successful business code (code 0). When it
+    // does, it is the authoritative source: an empty list means "no videos", which
+    // must not be re-reported as a permission error from the risk-controlled dynamic feed.
+    let mediaSucceeded = false;
 
     // PRIMARY: Space dynamic feed (sorted newest-first, covers all dynamic types)
     try {
@@ -50,7 +58,7 @@ export const bilibiliAdapter: PlatformAdapter = {
           Accept: 'application/json, text/plain, */*',
           Referer: `https://space.bilibili.com/${uid}/dynamic`,
           Origin: 'https://space.bilibili.com',
-          'User-Agent': 'Mozilla/5.0',
+          'User-Agent': BILI_UA,
         },
       });
 
@@ -162,6 +170,7 @@ export const bilibiliAdapter: PlatformAdapter = {
           headers: {
             'Accept': 'application/json, text/plain, */*',
             'Referer': `https://space.bilibili.com/${uid}/video`,
+            'User-Agent': BILI_UA,
           },
         });
 
@@ -170,8 +179,12 @@ export const bilibiliAdapter: PlatformAdapter = {
           if (json.code !== 0) {
             lastMediaCode = json.code;
             console.warn('[Bilibili] medialist returned code', json.code, json.message);
-          } else if (json.data?.media_list) {
-            for (const item of json.data.media_list) {
+          } else {
+            // code 0 is authoritative, even when media_list is null/empty
+            // ("account has no videos") — do not surface a dynamic-feed error then.
+            mediaSucceeded = true;
+            const mediaList = Array.isArray(json.data?.media_list) ? json.data.media_list : [];
+            for (const item of mediaList) {
               const bvid = item.bv_id;
               if (!bvid || seenBvids.has(bvid)) continue;
 
@@ -211,18 +224,32 @@ export const bilibiliAdapter: PlatformAdapter = {
       }
     }
 
-    // Fallback: space archive search
+    // The medialist supplement above already ran whenever allPosts.length < limit
+    // (which includes the empty case). Here we only decide the final error:
+    //  - medialist code 0 (authoritative): empty list = "no content", never a
+    //    permission error, even if the risk-controlled dynamic feed also failed;
+    //  - medialist business code: report that as the real cause;
+    //  - dynamic-feed hard failure only matters when medialist itself failed/errored.
     if (allPosts.length === 0) {
-      const archiveResult = await this.fetchArchiveFallback(channel, limit, options);
-      // A hard business-code failure (permission / risk-control) must not be masked by an empty archive result.
-      const hardCode = lastDynamicCode ?? lastMediaCode;
-      if (hardCode !== undefined && archiveResult.posts.length === 0) {
+      if (mediaSucceeded) {
+        // Medialist is authoritative and returned nothing (or only watermark-skipped items).
         return {
           posts: [],
-          error: biliCodeMessage(hardCode, archiveResult.error),
+          authorMeta: { name: authorName, avatar: authorAvatar },
         };
       }
-      return archiveResult;
+
+      const hardCode = lastMediaCode ?? lastDynamicCode;
+      if (hardCode !== undefined) {
+        return {
+          posts: [],
+          error: biliCodeMessage(hardCode),
+        };
+      }
+      return {
+        posts: [],
+        error: '未获取到B站内容（账号可能无投稿或已注销）',
+      };
     }
 
     allPosts.sort((a, b) => b.publishedAt - a.publishedAt);
@@ -256,6 +283,7 @@ export const bilibiliAdapter: PlatformAdapter = {
         headers: {
           'Accept': 'application/json, text/plain, */*',
           'Referer': `https://space.bilibili.com/${uid}/dynamic`,
+          'User-Agent': BILI_UA,
         },
       });
 
@@ -353,54 +381,6 @@ export const bilibiliAdapter: PlatformAdapter = {
       nextCursor,
       hasMore,
     };
-  },
-
-  async fetchArchiveFallback(channel: Channel, limit: number = 10, options?: FetchOptions): Promise<FetchResult> {
-    try {
-      const uid = channel.accountId;
-      const sinceTs = options?.sinceTimestamp ?? 0;
-      const pn = options?.cursor ? Math.max(Number(options.cursor) || 1, 1) : 1;
-      const archiveUrl = `https://api.bilibili.com/x/space/wbi/arc/search?mid=${uid}&ps=${limit}&tid=0&pn=${pn}&order=pubdate`;
-      const res = await bgFetch(archiveUrl, {
-        headers: { 'Referer': `https://space.bilibili.com/${uid}/video` },
-      });
-
-      if (!res.ok) return { posts: [], error: `B站接口异常 HTTP ${res.status}` };
-
-      const json = JSON.parse(res.data);
-      if (json.code === 0 && json.data?.list?.vlist) {
-        const vlist: any[] = json.data.list.vlist;
-        const total = json.data?.page?.count || 0;
-        const hasMore = pn * limit < total && vlist.length > 0;
-
-        const posts: Post[] = vlist
-          .filter((v: any) => sinceTs === 0 || v.created * 1000 > sinceTs)
-          .map((v: any) => ({
-            id: `bilibili_video_${v.bvid}`,
-            creatorId: channel.creatorId,
-            channelId: channel.id,
-            platform: 'bilibili',
-            title: v.title,
-            content: v.description || v.title,
-            mediaList: [{ type: 'video', previewUrl: v.pic, originalUrl: `https://www.bilibili.com/video/${v.bvid}` }],
-            originalUrl: `https://www.bilibili.com/video/${v.bvid}`,
-            publishedAt: v.created * 1000,
-            fetchedAt: Date.now(),
-            isRead: false,
-            isRepost: false,
-          }));
-
-        return {
-          posts,
-          authorMeta: { name: vlist[0]?.author || channel.displayName },
-          nextCursor: hasMore ? String(pn + 1) : undefined,
-          hasMore,
-        };
-      }
-      return { posts: [], error: biliCodeMessage(json.code, json.message || '获取B站投稿失败') };
-    } catch (e: any) {
-      return { posts: [], error: e.message || '网络连接异常' };
-    }
   },
 
   async checkAuthStatus(): Promise<{ loggedIn: boolean; username?: string }> {

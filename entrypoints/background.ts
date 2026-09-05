@@ -79,17 +79,20 @@ async function updateUnreadBadge() {
             // fetch "Cookie" header: browsers forbid and silently strip it, which caused
             // unauthenticated "访问权限不足" responses. They are attached automatically by
             // fetch's credentials: 'include' (host permissions already declared in the manifest).
-            // Read them here only to surface a clear warning when the user is not logged in.
+            // Note: User-Agent / Referer / Origin are also browser-forbidden headers and are
+            // ignored even if set here; the browser sends its own real UA automatically. The
+            // adapter relies on medialist (which needs no special headers) as the authoritative
+            // source, so the risk-controlled dynamic feed is only a best-effort supplement.
             try {
               const cookies = await Promise.all([
                 chrome.cookies.get({ url: 'https://www.bilibili.com', name: 'SESSDATA' }),
                 chrome.cookies.get({ url: 'https://www.bilibili.com', name: 'DedeUserID' }),
-                chrome.cookies.get({ url: 'https://www.bilibili.com', name: 'bili_jct' }),
                 chrome.cookies.get({ url: 'https://www.bilibili.com', name: 'buvid3' }),
-                chrome.cookies.get({ url: 'https://www.bilibili.com', name: 'buvid4' }),
               ]);
-              if (!cookies.some(cookie => Boolean(cookie?.value))) {
-                console.warn('[Background] Bilibili: no login cookies found; request may be unauthenticated');
+              if (!cookies.some((cookie) => Boolean(cookie?.value))) {
+                console.warn(
+                  '[Background] Bilibili: no login/device cookies found; the dynamic feed may be risk-controlled (video list will still work)'
+                );
               }
             } catch (error) {
               console.warn('[Background] Bilibili cookie read failed:', error);
