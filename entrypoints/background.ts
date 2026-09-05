@@ -4,6 +4,9 @@ import { updateChannel } from '../src/adapters';
 
 const AUTO_SYNC_ALARM = 'creator-feed-auto-sync';
 
+// Public guest bearer token used by x.com's web GraphQL client.
+const TWITTER_BEARER_TOKEN = 'AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA';
+
 export default defineBackground(() => {
   console.log('[Creator Feed Hub] Background Service Worker ready');
   setupDeclarativeNetRules();
@@ -219,9 +222,10 @@ async function updateUnreadBadge() {
             return;
           }
 
-          const directResult = await fetchTwitterTimelineDirect(username, limit, onlyOriginal, cursor);
-          const result = directResult || await fetchTwitterTimelineViaTabOrSession(username, limit, onlyOriginal, cursor);
-          sendResponse(result);
+          // Keep the proven page-context path as primary; direct fetch is only a fallback.
+          const pageResult = await fetchTwitterTimelineViaTabOrSession(username, limit, onlyOriginal, cursor);
+          const directResult = pageResult?.success ? null : await fetchTwitterTimelineDirect(username, limit, onlyOriginal, cursor);
+          sendResponse(pageResult?.success ? pageResult : (directResult || pageResult));
         } catch (err: any) {
           sendResponse({ success: false, error: err?.message || '获取推特动态异常' });
         }
@@ -263,15 +267,79 @@ async function updateUnreadBadge() {
       if (!ct0Cookie?.value || !authCookie?.value) return null;
       const headers: Record<string, string> = {
         Accept: '*/*',
+        Authorization: `Bearer ${TWITTER_BEARER_TOKEN}`,
         'Content-Type': 'application/json',
         'x-csrf-token': ct0Cookie.value,
         'x-twitter-active-user': 'yes',
         'x-twitter-auth-type': 'OAuth2Session',
         'x-twitter-client-language': 'zh-cn',
       };
-      const endpoint = (operation: string, variables: Record<string, unknown>) => {
-        const features = { responsive_web_graphql_timeline_navigation_enabled: true, creator_subscriptions_tweet_preview_api_enabled: true, rweb_tipjar_consumption_enabled: true, responsive_web_profile_redirect_enabled: true };
-        return `https://x.com/i/api/graphql/${operation}?variables=${encodeURIComponent(JSON.stringify(variables))}&features=${encodeURIComponent(JSON.stringify(features))}`;
+      const endpoint = (operation: string, variables: Record<string, unknown>, features: Record<string, unknown>, fieldToggles: Record<string, unknown>) => {
+        return `https://x.com/i/api/graphql/${operation}?variables=${encodeURIComponent(JSON.stringify(variables))}&features=${encodeURIComponent(JSON.stringify(features))}&fieldToggles=${encodeURIComponent(JSON.stringify(fieldToggles))}`;
+      };
+      const userFeatures = {
+        hidden_profile_subscriptions_enabled: true,
+        rweb_tipjar_consumption_enabled: true,
+        responsive_web_graphql_exclude_directive_enabled: true,
+        verified_phone_label_enabled: false,
+        subscriptions_verification_info_is_identity_verified_enabled: true,
+        subscriptions_verification_info_verified_since_enabled: true,
+        highlights_tweets_tab_ui_enabled: true,
+        responsive_web_twitter_article_notes_tab_enabled: true,
+        subscriptions_feature_can_gift_premium: true,
+        creator_subscriptions_tweet_preview_api_enabled: true,
+        responsive_web_graphql_timeline_navigation_enabled: true,
+      };
+      const userFieldToggles = { withPayments: false, withAuxiliaryUserLabels: false };
+      const tweetFeatures = {
+        rweb_video_screen_enabled: true,
+        rweb_cashtags_enabled: true,
+        profile_label_improvements_pcf_label_in_post_enabled: true,
+        responsive_web_profile_redirect_enabled: true,
+        rweb_tipjar_consumption_enabled: true,
+        verified_phone_label_enabled: false,
+        creator_subscriptions_tweet_preview_api_enabled: true,
+        responsive_web_graphql_timeline_navigation_enabled: true,
+        premium_content_api_read_enabled: false,
+        communities_web_enable_tweet_community_results_fetch: true,
+        c9s_tweet_anatomy_moderator_badge_enabled: true,
+        responsive_web_grok_analyze_button_fetch_trends_enabled: false,
+        responsive_web_grok_analyze_post_followups_enabled: false,
+        rweb_cashtags_composer_attachment_enabled: true,
+        responsive_web_jetfuel_frame: false,
+        responsive_web_grok_share_attachment_enabled: true,
+        responsive_web_grok_annotations_enabled: false,
+        articles_preview_enabled: true,
+        responsive_web_edit_tweet_api_enabled: true,
+        rweb_conversational_replies_downvote_enabled: true,
+        graphql_is_translatable_rweb_tweet_is_translatable_enabled: true,
+        view_counts_everywhere_api_enabled: true,
+        longform_notetweets_consumption_enabled: true,
+        responsive_web_twitter_article_tweet_consumption_enabled: true,
+        content_disclosure_indicator_enabled: true,
+        content_disclosure_ai_generated_indicator_enabled: true,
+        responsive_web_grok_show_grok_translated_post: false,
+        responsive_web_grok_analysis_button_from_backend: false,
+        post_ctas_fetch_enabled: true,
+        freedom_of_speech_not_reach_fetch_enabled: true,
+        standardized_nudges_misinfo: true,
+        tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled: true,
+        longform_notetweets_rich_text_read_enabled: true,
+        longform_notetweets_inline_media_enabled: true,
+        responsive_web_grok_image_annotation_enabled: false,
+        responsive_web_grok_imagine_annotation_enabled: false,
+        responsive_web_grok_community_note_auto_translation_is_enabled: false,
+        responsive_web_enhance_cards_enabled: false,
+      };
+      const tweetFieldToggles = {
+        withPayments: false,
+        withAuxiliaryUserLabels: false,
+        withArticleRichContentState: false,
+        withArticlePlainText: false,
+        withArticleSummaryText: false,
+        withArticleVoiceOver: false,
+        withGrokAnalyze: false,
+        withDisallowedReplyControls: false,
       };
       const userController = new AbortController();
       const userTimer = setTimeout(() => userController.abort(), 8_000);
@@ -280,7 +348,7 @@ async function updateUnreadBadge() {
         userResponse = await fetch(endpoint('Gb-d6r0vxPOADdG62OEBpQ/UserByScreenName', {
           screen_name: username,
           withSafetyModeUserFields: true,
-        }), { headers, credentials: 'include', signal: userController.signal });
+        }, userFeatures, userFieldToggles), { headers, credentials: 'include', signal: userController.signal });
       } finally {
         clearTimeout(userTimer);
       }
@@ -306,7 +374,7 @@ async function updateUnreadBadge() {
       const tweetTimer = setTimeout(() => tweetController.abort(), 8_000);
       let tweetResponse: Response;
       try {
-        tweetResponse = await fetch(endpoint('eviprbEPLvNG88V3smUngQ/UserTweets', variables), { headers, credentials: 'include', signal: tweetController.signal });
+        tweetResponse = await fetch(endpoint('eviprbEPLvNG88V3smUngQ/UserTweets', variables, tweetFeatures, tweetFieldToggles), { headers, credentials: 'include', signal: tweetController.signal });
       } finally {
         clearTimeout(tweetTimer);
       }
@@ -399,6 +467,7 @@ async function updateUnreadBadge() {
             }
 
             const headers: Record<string, string> = {
+              Authorization: `Bearer ${TWITTER_BEARER_TOKEN}`,
               'x-csrf-token': ct0,
               'x-twitter-active-user': 'yes',
               'x-twitter-auth-type': 'OAuth2Session',
