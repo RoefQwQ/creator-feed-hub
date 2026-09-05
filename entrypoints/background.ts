@@ -71,17 +71,17 @@ async function updateUnreadBadge() {
           const url = message.url as string;
           const headers: Record<string, string> = { ...(message.options?.headers || {}) };
 
-          // 1. Auto-inject X/Twitter authentication headers if accessing x.com / twitter.com
-          if ((url.includes('x.com') || url.includes('twitter.com')) && typeof chrome !== 'undefined' && chrome.cookies) {
+          if (url.includes('bilibili.com') || url.includes('hdslb.com')) {
             try {
-              const ct0Cookie = (await chrome.cookies.get({ url: 'https://x.com', name: 'ct0' }))
-                || (await chrome.cookies.get({ url: 'https://twitter.com', name: 'ct0' }));
-              if (ct0Cookie && !headers['x-csrf-token']) {
-                headers['x-csrf-token'] = ct0Cookie.value;
-              }
-              // Browser cookies provide the authenticated session; no credential is stored in source.
-            } catch (e) {
-              console.warn('[Background] Twitter cookie inject error:', e);
+              const cookies = await Promise.all([
+                chrome.cookies.get({ url: 'https://www.bilibili.com', name: 'SESSDATA' }),
+                chrome.cookies.get({ url: 'https://www.bilibili.com', name: 'DedeUserID' }),
+                chrome.cookies.get({ url: 'https://www.bilibili.com', name: 'bili_jct' }),
+              ]);
+              const cookieText = cookies.filter((cookie): cookie is chrome.cookies.Cookie => Boolean(cookie?.value)).map(cookie => `${cookie.name}=${cookie.value}`).join('; ');
+              if (cookieText) headers.Cookie = cookieText;
+            } catch (error) {
+              console.warn('[Background] Bilibili cookie injection failed:', error);
             }
           }
 
@@ -221,6 +221,7 @@ async function updateUnreadBadge() {
 
           const directResult = await fetchTwitterTimelineDirect(username, limit, onlyOriginal, cursor);
           const result = directResult || await fetchTwitterTimelineViaTabOrSession(username, limit, onlyOriginal, cursor);
+          sendResponse(result);
         } catch (err: any) {
           sendResponse({ success: false, error: err?.message || '获取推特动态异常' });
         }
@@ -272,10 +273,17 @@ async function updateUnreadBadge() {
         const features = { responsive_web_graphql_timeline_navigation_enabled: true, creator_subscriptions_tweet_preview_api_enabled: true, rweb_tipjar_consumption_enabled: true, responsive_web_profile_redirect_enabled: true };
         return `https://x.com/i/api/graphql/${operation}?variables=${encodeURIComponent(JSON.stringify(variables))}&features=${encodeURIComponent(JSON.stringify(features))}`;
       };
-      const userResponse = await fetch(endpoint('Gb-d6r0vxPOADdG62OEBpQ/UserByScreenName', {
-        screen_name: username,
-        withSafetyModeUserFields: true,
-      }), { headers, credentials: 'include' });
+      const userController = new AbortController();
+      const userTimer = setTimeout(() => userController.abort(), 8_000);
+      let userResponse: Response;
+      try {
+        userResponse = await fetch(endpoint('Gb-d6r0vxPOADdG62OEBpQ/UserByScreenName', {
+          screen_name: username,
+          withSafetyModeUserFields: true,
+        }), { headers, credentials: 'include', signal: userController.signal });
+      } finally {
+        clearTimeout(userTimer);
+      }
       if (!userResponse.ok) return { success: false, error: `查询推特用户 @${username} 失败 (HTTP ${userResponse.status})` };
       const userData: unknown = await userResponse.json();
       if (!userData || typeof userData !== 'object' || !('data' in userData)) return { success: false, error: '推特用户接口返回数据格式异常' };
@@ -294,7 +302,14 @@ async function updateUnreadBadge() {
         withV2Timeline: true,
       };
       if (cursor) variables.cursor = cursor;
-      const tweetResponse = await fetch(endpoint('eviprbEPLvNG88V3smUngQ/UserTweets', variables), { headers, credentials: 'include' });
+      const tweetController = new AbortController();
+      const tweetTimer = setTimeout(() => tweetController.abort(), 8_000);
+      let tweetResponse: Response;
+      try {
+        tweetResponse = await fetch(endpoint('eviprbEPLvNG88V3smUngQ/UserTweets', variables), { headers, credentials: 'include', signal: tweetController.signal });
+      } finally {
+        clearTimeout(tweetTimer);
+      }
       if (!tweetResponse.ok) return { success: false, error: `获取推特动态失败 (HTTP ${tweetResponse.status})` };
       return { success: true, tweetData: await tweetResponse.json(), userData };
     } catch (error: unknown) {

@@ -25,11 +25,13 @@ export const bilibiliAdapter: PlatformAdapter = {
 
     // PRIMARY: Space dynamic feed (sorted newest-first, covers all dynamic types)
     try {
-      const dynamicUrl = `https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space?host_mid=${uid}`;
+      const dynamicUrl = `https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space?host_mid=${encodeURIComponent(uid)}`;
       const res = await bgFetch(dynamicUrl, {
         headers: {
-          'Accept': 'application/json, text/plain, */*',
-          'Referer': `https://space.bilibili.com/${uid}/dynamic`,
+          Accept: 'application/json, text/plain, */*',
+          Referer: `https://space.bilibili.com/${uid}/dynamic`,
+          Origin: 'https://space.bilibili.com',
+          'User-Agent': 'Mozilla/5.0',
         },
       });
 

@@ -86,9 +86,9 @@ export async function updateChannel(
   });
 
   try {
-    // 20-second timeout to prevent channels spinning endlessly
+    // Twitter may need an existing authenticated tab fallback; allow enough time for it to load.
     const timeoutPromise = new Promise<FetchResult>((_, reject) => {
-      setTimeout(() => reject(new Error('同步请求超时 (已超过 20 秒未响应)')), 20_000);
+      setTimeout(() => reject(new Error('同步请求超时（已超过 45 秒未响应，请检查平台登录状态）')), 45_000);
     });
 
     // For normal (non-paginated) syncs, find the newest post already in DB to use as a watermark.
