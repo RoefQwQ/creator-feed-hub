@@ -152,6 +152,7 @@ export interface Creator {
   id: string; // uuid
   name: string; // 主展示名
   avatar: string; // 主头像
+  primaryAvatarUrl?: string; // 用户选择的主头像来源
   tags: string[]; // 自定义标签，如 ['ASMR', '插画', 'VUP']
   note?: string; // 自定义备忘录
   sortOrder?: number;

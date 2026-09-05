@@ -798,6 +798,19 @@ const creatorTagFilter = ref('all');
 const creatorSortBy = ref<'updated' | 'channels' | 'posts' | 'name'>('updated');
 const isBatchMode = ref(false);
 const selectedCreatorIds = ref<Set<string>>(new Set());
+const avatarPickerCreator = ref<Creator | null>(null);
+
+function openAvatarPicker(creator: Creator) {
+  avatarPickerCreator.value = creator;
+}
+
+async function selectPrimaryAvatar(creator: Creator, url: string) {
+  const avatar = toSecureMediaUrl(url);
+  await db.creators.update(creator.id, { avatar, primaryAvatarUrl: avatar, updatedAt: Date.now() });
+  creator.avatar = avatar;
+  creator.primaryAvatarUrl = avatar;
+  avatarPickerCreator.value = null;
+}
 
 // Post count map per creator
 const creatorPostCountMap = computed(() => {
@@ -2344,6 +2357,7 @@ function formatTime(timestamp: number) {
                   />
                   <span v-else>{{ c.name.slice(0, 1) }}</span>
                 </div>
+                    <button @click.stop="openAvatarPicker(c)" class="text-[10px] text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer">选择主头像</button>
 
                 <!-- Name & Meta Tags -->
                 <div class="min-w-0">
@@ -3673,5 +3687,17 @@ function formatTime(timestamp: number) {
     </div>
 
     <MediaLightbox v-if="lightboxMedia" :media="lightboxMedia" @close="lightboxMedia = null" />
+  </div>
+  <div v-if="avatarPickerCreator" class="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4" @click.self="avatarPickerCreator = null">
+    <div class="w-full max-w-sm rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 p-4 shadow-xl">
+      <div class="flex items-center justify-between mb-3"><h3 class="font-bold text-sm">选择主头像</h3><button class="text-slate-400 cursor-pointer" @click="avatarPickerCreator = null">×</button></div>
+      <div class="space-y-2">
+        <button v-for="ch in channels.filter(item => item.creatorId === avatarPickerCreator?.id && item.avatarUrl)" :key="ch.id" class="w-full flex items-center gap-3 p-2 rounded-xl hover:bg-indigo-50 dark:hover:bg-slate-800 text-left cursor-pointer" @click="selectPrimaryAvatar(avatarPickerCreator!, ch.avatarUrl!)">
+          <img :src="toSecureMediaUrl(ch.avatarUrl)" class="w-9 h-9 rounded-full object-cover" referrerpolicy="no-referrer" />
+          <span class="text-xs truncate">{{ PLATFORM_REGISTRY[ch.platform]?.name || ch.platform }} · {{ ch.displayName || ch.accountId }}</span>
+        </button>
+        <p v-if="!channels.some(item => item.creatorId === avatarPickerCreator?.id && item.avatarUrl)" class="text-xs text-slate-400 py-4 text-center">暂无可用平台头像</p>
+      </div>
+    </div>
   </div>
 </template>
