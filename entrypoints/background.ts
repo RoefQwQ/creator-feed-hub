@@ -75,16 +75,24 @@ async function updateUnreadBadge() {
           const headers: Record<string, string> = { ...(message.options?.headers || {}) };
 
           if (url.includes('bilibili.com') || url.includes('hdslb.com')) {
+            // Bilibili cookies (incl. HttpOnly SESSDATA / bili_jct) cannot be set via the
+            // fetch "Cookie" header: browsers forbid and silently strip it, which caused
+            // unauthenticated "访问权限不足" responses. They are attached automatically by
+            // fetch's credentials: 'include' (host permissions already declared in the manifest).
+            // Read them here only to surface a clear warning when the user is not logged in.
             try {
               const cookies = await Promise.all([
                 chrome.cookies.get({ url: 'https://www.bilibili.com', name: 'SESSDATA' }),
                 chrome.cookies.get({ url: 'https://www.bilibili.com', name: 'DedeUserID' }),
                 chrome.cookies.get({ url: 'https://www.bilibili.com', name: 'bili_jct' }),
+                chrome.cookies.get({ url: 'https://www.bilibili.com', name: 'buvid3' }),
+                chrome.cookies.get({ url: 'https://www.bilibili.com', name: 'buvid4' }),
               ]);
-              const cookieText = cookies.filter((cookie): cookie is chrome.cookies.Cookie => Boolean(cookie?.value)).map(cookie => `${cookie.name}=${cookie.value}`).join('; ');
-              if (cookieText) headers.Cookie = cookieText;
+              if (!cookies.some(cookie => Boolean(cookie?.value))) {
+                console.warn('[Background] Bilibili: no login cookies found; request may be unauthenticated');
+              }
             } catch (error) {
-              console.warn('[Background] Bilibili cookie injection failed:', error);
+              console.warn('[Background] Bilibili cookie read failed:', error);
             }
           }
 

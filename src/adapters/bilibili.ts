@@ -2,6 +2,22 @@ import type { Channel, Post } from '../types';
 import type { PlatformAdapter, FetchResult, FetchOptions } from './types';
 import { bgFetch } from '../utils/http';
 
+/** Map Bilibili business error codes to a clear, user-facing message. */
+function biliCodeMessage(code: number, fallback?: string): string {
+  switch (code) {
+    case -101:
+      return 'B站未登录或登录已过期，请检查登录状态';
+    case -352:
+      return 'B站风控校验失败，请稍后重试或完成人机验证';
+    case -403:
+      return 'B站接口拒绝访问（权限不足或签名失效），请确认登录状态后重试';
+    case -412:
+      return 'B站请求被拦截（风控），请稍后重试';
+    default:
+      return fallback || `B站接口异常 (code ${code})`;
+  }
+}
+
 export const bilibiliAdapter: PlatformAdapter = {
   platform: 'bilibili',
 
@@ -22,6 +38,9 @@ export const bilibiliAdapter: PlatformAdapter = {
     const seenBvids = new Set<string>();
     let nextCursor: string | undefined;
     let hasMore = false;
+    // Remember non-zero business codes so a total-empty result reports the real cause.
+    let lastDynamicCode: number | undefined;
+    let lastMediaCode: number | undefined;
 
     // PRIMARY: Space dynamic feed (sorted newest-first, covers all dynamic types)
     try {
@@ -37,7 +56,10 @@ export const bilibiliAdapter: PlatformAdapter = {
 
       if (res.ok && res.data) {
         const json = JSON.parse(res.data);
-        if (json.code === 0 && json.data?.items) {
+        if (json.code !== 0) {
+          lastDynamicCode = json.code;
+          console.warn('[Bilibili] dynamic feed returned code', json.code, json.message);
+        } else if (json.data?.items) {
           const items: any[] = json.data.items;
           if (json.data.has_more) hasMore = true;
           if (json.data.offset) nextCursor = String(json.data.offset);
@@ -75,16 +97,35 @@ export const bilibiliAdapter: PlatformAdapter = {
             const title = moduleDynamic.major?.archive?.title || '';
 
             const mediaList: any[] = [];
-            if (moduleDynamic.major?.archive) {
+            const major = moduleDynamic.major || {};
+            if (major.archive) {
               mediaList.push({
                 type: 'video',
-                previewUrl: moduleDynamic.major.archive.cover,
-                originalUrl: `https://www.bilibili.com/video/${moduleDynamic.major.archive.bvid}`,
+                previewUrl: major.archive.cover,
+                originalUrl: `https://www.bilibili.com/video/${major.archive.bvid}`,
               });
             }
-            if (moduleDynamic.major?.draw?.items) {
-              for (const img of moduleDynamic.major.draw.items) {
+            if (major.draw?.items) {
+              for (const img of major.draw.items) {
                 mediaList.push({ type: 'image', previewUrl: img.src, originalUrl: img.src });
+              }
+            }
+            // Forward posts: archive/draw media live on the original item, not the forward wrapper.
+            if (isForward && item.orig?.modules?.module_dynamic?.major) {
+              const origMajor = item.orig.modules.module_dynamic.major;
+              if (origMajor.archive && !mediaList.some((m) => m.type === 'video' && m.originalUrl?.endsWith(origMajor.archive.bvid))) {
+                mediaList.push({
+                  type: 'video',
+                  previewUrl: origMajor.archive.cover,
+                  originalUrl: `https://www.bilibili.com/video/${origMajor.archive.bvid}`,
+                });
+              }
+              if (origMajor.draw?.items) {
+                for (const img of origMajor.draw.items) {
+                  if (!mediaList.some((m) => m.type === 'image' && m.previewUrl === img.src)) {
+                    mediaList.push({ type: 'image', previewUrl: img.src, originalUrl: img.src });
+                  }
+                }
               }
             }
 
@@ -126,7 +167,10 @@ export const bilibiliAdapter: PlatformAdapter = {
 
         if (res.ok && res.data) {
           const json = JSON.parse(res.data);
-          if (json.code === 0 && json.data?.media_list) {
+          if (json.code !== 0) {
+            lastMediaCode = json.code;
+            console.warn('[Bilibili] medialist returned code', json.code, json.message);
+          } else if (json.data?.media_list) {
             for (const item of json.data.media_list) {
               const bvid = item.bv_id;
               if (!bvid || seenBvids.has(bvid)) continue;
@@ -169,7 +213,16 @@ export const bilibiliAdapter: PlatformAdapter = {
 
     // Fallback: space archive search
     if (allPosts.length === 0) {
-      return await this.fetchArchiveFallback(channel, limit, options);
+      const archiveResult = await this.fetchArchiveFallback(channel, limit, options);
+      // A hard business-code failure (permission / risk-control) must not be masked by an empty archive result.
+      const hardCode = lastDynamicCode ?? lastMediaCode;
+      if (hardCode !== undefined && archiveResult.posts.length === 0) {
+        return {
+          posts: [],
+          error: biliCodeMessage(hardCode, archiveResult.error),
+        };
+      }
+      return archiveResult;
     }
 
     allPosts.sort((a, b) => b.publishedAt - a.publishedAt);
@@ -237,16 +290,35 @@ export const bilibiliAdapter: PlatformAdapter = {
             const title = moduleDynamic.major?.archive?.title || '';
 
             const mediaList: any[] = [];
-            if (moduleDynamic.major?.archive) {
+            const major = moduleDynamic.major || {};
+            if (major.archive) {
               mediaList.push({
                 type: 'video',
-                previewUrl: moduleDynamic.major.archive.cover,
-                originalUrl: `https://www.bilibili.com/video/${moduleDynamic.major.archive.bvid}`,
+                previewUrl: major.archive.cover,
+                originalUrl: `https://www.bilibili.com/video/${major.archive.bvid}`,
               });
             }
-            if (moduleDynamic.major?.draw?.items) {
-              for (const img of moduleDynamic.major.draw.items) {
+            if (major.draw?.items) {
+              for (const img of major.draw.items) {
                 mediaList.push({ type: 'image', previewUrl: img.src, originalUrl: img.src });
+              }
+            }
+            // Forward posts: archive/draw media live on the original item, not the forward wrapper.
+            if (isForward && item.orig?.modules?.module_dynamic?.major) {
+              const origMajor = item.orig.modules.module_dynamic.major;
+              if (origMajor.archive && !mediaList.some((m) => m.type === 'video' && m.originalUrl?.endsWith(origMajor.archive.bvid))) {
+                mediaList.push({
+                  type: 'video',
+                  previewUrl: origMajor.archive.cover,
+                  originalUrl: `https://www.bilibili.com/video/${origMajor.archive.bvid}`,
+                });
+              }
+              if (origMajor.draw?.items) {
+                for (const img of origMajor.draw.items) {
+                  if (!mediaList.some((m) => m.type === 'image' && m.previewUrl === img.src)) {
+                    mediaList.push({ type: 'image', previewUrl: img.src, originalUrl: img.src });
+                  }
+                }
               }
             }
 
@@ -325,7 +397,7 @@ export const bilibiliAdapter: PlatformAdapter = {
           hasMore,
         };
       }
-      return { posts: [], error: json.message || '获取B站投稿失败' };
+      return { posts: [], error: biliCodeMessage(json.code, json.message || '获取B站投稿失败') };
     } catch (e: any) {
       return { posts: [], error: e.message || '网络连接异常' };
     }
