@@ -15,6 +15,8 @@
 - 同步保护：超时、冷却、请求间隔、增量水位、历史游标和收藏保护。
 - 自动同步：后台通过 `chrome.alarms` 每 30 分钟执行一次同步，并更新未读角标。
 - 备份迁移：支持导出和导入 JSON 数据。
+- 头像管理：添加创作者时尝试读取当前页面头像；创作者可从多个绑定账号头像中选择并持久化主头像。
+- 交接记录：`HANDOFF_AVATAR.md` 仅记录头像功能目标、已确认事实和待确认问题。
 
 ## 快速开始
 
@@ -112,11 +114,11 @@ creator-feed-hub/
 │  ├─ background.ts                    # MV3 Service Worker、BG_FETCH、定时同步、徽标
 │  ├─ rplay-sync.content.ts            # Rplay 页面会话同步 content script
 │  ├─ popup/
-│  │  ├─ App.vue                       # 快速识别、创建和绑定账号
+│  │  ├─ App.vue                       # 快速识别、创建和绑定账号；页面信息提取
 │  │  ├─ index.html
 │  │  └─ main.ts
 │  └─ dashboard/
-│     ├─ App.vue                       # Dashboard 状态编排和页面容器
+│     ├─ App.vue                       # Dashboard 状态编排、关注管理和主头像选择
 │     ├─ components/
 │     │  ├─ PostCard.vue                # Feed/收藏共用动态卡片
 │     │  ├─ MediaLightbox.vue           # 媒体灯箱
