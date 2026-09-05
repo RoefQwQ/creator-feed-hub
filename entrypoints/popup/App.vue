@@ -2,6 +2,7 @@
 import { ref, onMounted, computed } from 'vue';
 import { db } from '../../src/db';
 import { parseProfileUrl, type ParsedProfile } from '../../src/utils/urlParser';
+import { toSecureMediaUrl } from '../../src/utils/media';
 import { PLATFORM_REGISTRY, type Creator, type Channel } from '../../src/types';
 import { updateChannel, clearStaleUpdatingStatus } from '../../src/adapters';
 import {
@@ -220,7 +221,7 @@ async function extractActiveTabAuthorMeta(tabId: number, tabUrl?: string) {
         newCreatorName.value = name;
       }
       if (avatar) {
-        detectedAuthorMeta.value.avatar = avatar;
+        detectedAuthorMeta.value.avatar = toSecureMediaUrl(avatar);
       }
     }
   } catch (err) {
@@ -455,7 +456,7 @@ const currentPlatformMeta = computed(() => {
             <div class="w-10 h-10 rounded-full bg-slate-100 dark:bg-slate-700 border border-slate-200 dark:border-slate-600 flex items-center justify-center font-bold text-sm text-indigo-600 dark:text-indigo-300 overflow-hidden shrink-0 shadow-2xs">
               <img
                 v-if="detectedAuthorMeta.avatar"
-                :src="detectedAuthorMeta.avatar"
+                :src="toSecureMediaUrl(detectedAuthorMeta.avatar)"
                 class="w-full h-full object-cover"
                 referrerpolicy="no-referrer"
               />
@@ -548,7 +549,7 @@ const currentPlatformMeta = computed(() => {
                   >
                     <div class="flex items-center gap-2 min-w-0">
                       <div class="w-6 h-6 rounded-lg bg-indigo-100 dark:bg-indigo-900/60 flex items-center justify-center font-bold text-[10px] text-indigo-600 dark:text-indigo-300 overflow-hidden shrink-0 border border-indigo-200 dark:border-indigo-800">
-                        <img v-if="c.avatar" :src="c.avatar" class="w-full h-full object-cover" referrerpolicy="no-referrer" />
+                        <img v-if="c.avatar" :src="toSecureMediaUrl(c.avatar)" class="w-full h-full object-cover" referrerpolicy="no-referrer" />
                         <span v-else>{{ c.name.slice(0, 1) }}</span>
                       </div>
                       <div class="min-w-0">
@@ -594,7 +595,7 @@ const currentPlatformMeta = computed(() => {
               >
                 <div class="flex items-center gap-2 min-w-0">
                   <div class="w-7 h-7 rounded-lg bg-indigo-100 dark:bg-indigo-900/60 flex items-center justify-center font-bold text-[11px] text-indigo-600 dark:text-indigo-300 overflow-hidden shrink-0 border border-indigo-200 dark:border-indigo-800">
-                    <img v-if="selectedCreatorObj.avatar" :src="selectedCreatorObj.avatar" class="w-full h-full object-cover" referrerpolicy="no-referrer" />
+                    <img v-if="selectedCreatorObj.avatar" :src="toSecureMediaUrl(selectedCreatorObj.avatar)" class="w-full h-full object-cover" referrerpolicy="no-referrer" />
                     <span v-else>{{ selectedCreatorObj.name.slice(0, 1) }}</span>
                   </div>
                   <div class="min-w-0">
@@ -647,7 +648,7 @@ const currentPlatformMeta = computed(() => {
                   >
                     <div class="flex items-center gap-2 min-w-0">
                       <div class="w-6 h-6 rounded bg-slate-100 dark:bg-slate-700 flex items-center justify-center font-bold text-[10px] text-indigo-600 overflow-hidden shrink-0 border border-slate-200 dark:border-slate-600">
-                        <img v-if="c.avatar" :src="c.avatar" class="w-full h-full object-cover" referrerpolicy="no-referrer" />
+                        <img v-if="c.avatar" :src="toSecureMediaUrl(c.avatar)" class="w-full h-full object-cover" referrerpolicy="no-referrer" />
                         <span v-else>{{ c.name.slice(0, 1) }}</span>
                       </div>
                       <div class="min-w-0">

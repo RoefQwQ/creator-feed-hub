@@ -2,6 +2,7 @@
 import { computed } from 'vue';
 import { Bookmark, ChevronRight, Clock, ExternalLink, Film, Repeat2 } from 'lucide-vue-next';
 import { PLATFORM_REGISTRY, type Channel, type Creator, type Post } from '../../../src/types';
+import { toSecureMediaUrl } from '../../../src/utils/media';
 
 const props = withDefaults(defineProps<{
   post: Post;
@@ -24,7 +25,7 @@ const channelName = computed(() => channel.value?.displayName || channel.value?.
 const avatar = computed(() => creator.value?.avatar || channel.value?.avatarUrl || props.post.authorMeta?.avatar || '');
 const label = computed(() => props.post.channelLabel || channel.value?.label);
 const isRepost = computed(() => props.post.isRepost || props.post.content?.startsWith('RT @') || props.post.content?.includes('//转发自'));
-const secure = (url?: string) => (url || '').replace(/^http:\/\//i, 'https://');
+const secure = toSecureMediaUrl;
 const formatTime = (timestamp: number) => {
   if (!timestamp) return '未知时间';
   const date = new Date(timestamp < 1e12 ? timestamp * 1000 : timestamp);

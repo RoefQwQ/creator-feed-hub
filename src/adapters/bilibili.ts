@@ -1,6 +1,7 @@
 import type { Channel, Post } from '../types';
 import type { PlatformAdapter, FetchResult, FetchOptions } from './types';
 import { bgFetch } from '../utils/http';
+import { toSecureMediaUrl } from '../utils/media';
 
 // Mirror the real site's UA. Bilibili risk-control rejects the default fetch UA.
 const BILI_UA =
@@ -28,7 +29,7 @@ export const bilibiliAdapter: PlatformAdapter = {
   async fetchLatest(channel: Channel, limit: number = 15, options?: FetchOptions): Promise<FetchResult> {
     const uid = channel.accountId;
     let authorName = channel.displayName;
-    let authorAvatar = channel.avatarUrl;
+    let authorAvatar = toSecureMediaUrl(channel.avatarUrl);
 
     // sinceTimestamp: the watermark. Normal sync skips anything older or equal to this.
     // Historical dig (options.cursor is set) ignores the watermark and fetches older content.
@@ -78,7 +79,7 @@ export const bilibiliAdapter: PlatformAdapter = {
             const moduleDynamic = modules.module_dynamic || {};
 
             if (moduleAuthor.name) authorName = moduleAuthor.name;
-            if (moduleAuthor.face) authorAvatar = moduleAuthor.face;
+            if (moduleAuthor.face) authorAvatar = toSecureMediaUrl(moduleAuthor.face);
 
             const pubTime = moduleAuthor.pub_ts ? moduleAuthor.pub_ts * 1000 : 0;
 
@@ -193,7 +194,7 @@ export const bilibiliAdapter: PlatformAdapter = {
               if (sinceTs > 0 && pubTime > 0 && pubTime <= sinceTs) continue;
 
               if (item.upper?.name) authorName = item.upper.name;
-              if (item.upper?.face) authorAvatar = item.upper.face;
+              if (item.upper?.face) authorAvatar = toSecureMediaUrl(item.upper.face);
 
               seenBvids.add(bvid);
               const cover = item.cover || '';
@@ -300,7 +301,7 @@ export const bilibiliAdapter: PlatformAdapter = {
             const moduleDynamic = modules.module_dynamic || {};
 
             if (moduleAuthor.name) authorName = moduleAuthor.name;
-            if (moduleAuthor.face) authorAvatar = moduleAuthor.face;
+            if (moduleAuthor.face) authorAvatar = toSecureMediaUrl(moduleAuthor.face);
 
             const isForward = item.type === 'DYNAMIC_TYPE_FORWARD' || Boolean(item.orig);
             if (options.onlyOriginal && isForward) continue;

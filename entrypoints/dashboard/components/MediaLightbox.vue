@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { ExternalLink, X } from 'lucide-vue-next';
+import { toSecureMediaUrl } from '../../../src/utils/media';
 
 defineProps<{ media: { url: string; originalUrl?: string; type: string; title?: string } }>();
 const emit = defineEmits<{ close: [] }>();
-const secure = (url: string) => url.replace(/^http:\/\//i, 'https://');
+const secure = toSecureMediaUrl;
 </script>
 <template>
   <div class="fixed inset-0 z-50 bg-black/92 backdrop-blur-md flex flex-col justify-between p-4 sm:p-6" @click.self="emit('close')">

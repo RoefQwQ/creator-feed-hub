@@ -17,6 +17,7 @@ import {
   deepSyncChannel
 } from '../../src/adapters';
 import { parseProfileUrl } from '../../src/utils/urlParser';
+import { toSecureMediaUrl } from '../../src/utils/media';
 import {
   RefreshCw,
   Plus,
@@ -182,11 +183,6 @@ function resetCreatorHiddenPlatforms(creatorId: string) {
       localStorage.setItem('creator_feed_hidden_platforms', JSON.stringify(hiddenCreatorPlatforms.value));
     } catch {}
   }
-}
-
-function toSecureMediaUrl(url?: string): string {
-  if (!url) return '';
-  return url.replace(/^http:\/\//i, 'https://');
 }
 
 const failedAvatarUrls = ref<Set<string>>(new Set());
@@ -3055,7 +3051,7 @@ function formatTime(timestamp: number) {
             >
               <div class="flex items-center gap-2.5 min-w-0">
                 <div class="w-8 h-8 rounded-xl bg-indigo-100 dark:bg-indigo-900/60 flex items-center justify-center font-bold text-xs text-indigo-600 dark:text-indigo-300 overflow-hidden shrink-0 border border-indigo-200 dark:border-indigo-800">
-                  <img v-if="selectedCreatorObj.avatar" :src="selectedCreatorObj.avatar" class="w-full h-full object-cover" referrerpolicy="no-referrer" />
+                  <img v-if="selectedCreatorObj.avatar" :src="toSecureMediaUrl(selectedCreatorObj.avatar)" class="w-full h-full object-cover" referrerpolicy="no-referrer" />
                   <span v-else>{{ selectedCreatorObj.name.slice(0, 1) }}</span>
                 </div>
                 <div class="min-w-0">
@@ -3113,7 +3109,7 @@ function formatTime(timestamp: number) {
                 >
                   <div class="flex items-center gap-2 min-w-0">
                     <div class="w-7 h-7 rounded-lg bg-slate-100 dark:bg-slate-700 flex items-center justify-center font-bold text-[11px] text-indigo-600 overflow-hidden shrink-0 border border-slate-200 dark:border-slate-600">
-                      <img v-if="c.avatar" :src="c.avatar" class="w-full h-full object-cover" referrerpolicy="no-referrer" />
+                      <img v-if="c.avatar" :src="toSecureMediaUrl(c.avatar)" class="w-full h-full object-cover" referrerpolicy="no-referrer" />
                       <span v-else>{{ c.name.slice(0, 1) }}</span>
                     </div>
                     <div class="min-w-0">
@@ -3265,7 +3261,7 @@ function formatTime(timestamp: number) {
                 >
                   <div class="flex items-center gap-2 min-w-0">
                     <div class="w-6 h-6 rounded-lg bg-indigo-100 dark:bg-indigo-900/60 flex items-center justify-center font-bold text-[10px] text-indigo-600 dark:text-indigo-300 overflow-hidden shrink-0 border border-indigo-200 dark:border-indigo-800">
-                      <img v-if="c.avatar" :src="c.avatar" class="w-full h-full object-cover" referrerpolicy="no-referrer" />
+                      <img v-if="c.avatar" :src="toSecureMediaUrl(c.avatar)" class="w-full h-full object-cover" referrerpolicy="no-referrer" />
                       <span v-else>{{ c.name.slice(0, 1) }}</span>
                     </div>
                     <div class="min-w-0">
