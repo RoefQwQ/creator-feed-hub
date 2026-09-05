@@ -181,11 +181,8 @@ async function extractActiveTabAuthorMeta(tabId: number, tabUrl?: string) {
         else if (host.includes('bilibili.com')) {
           const bName = document.querySelector('#h-name, .user-name, .nickname, .bili-header__info__name')?.textContent?.trim();
           if (bName) name = bName;
-          const bAvatarCandidates = Array.from(document.querySelectorAll('img'))
-            .map(img => (img as HTMLImageElement).currentSrc || (img as HTMLImageElement).src)
-            .filter(src => src && !src.startsWith('data:') && /(hdslb\.com|bilibili\.com)/i.test(src));
           const bAvatar = document.querySelector('#h-avatar img, #h-avatar, .bili-avatar-img, .bili-avatar img, .header-avatar img, .user-avatar img') as HTMLImageElement | null;
-          avatar = bAvatar?.currentSrc || bAvatar?.src || bAvatarCandidates.find(src => /face|avatar|head/i.test(src)) || bAvatarCandidates[0] || '';
+          avatar = bAvatar?.currentSrc || bAvatar?.src || '';
         }
         // 4. Xiaohongshu
         else if (host.includes('xiaohongshu.com')) {
