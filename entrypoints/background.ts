@@ -219,8 +219,8 @@ async function updateUnreadBadge() {
             return;
           }
 
-          const result = await fetchTwitterTimelineViaTabOrSession(username, limit, onlyOriginal, cursor);
-          sendResponse(result);
+          const directResult = await fetchTwitterTimelineDirect(username, limit, onlyOriginal, cursor);
+          const result = directResult || await fetchTwitterTimelineViaTabOrSession(username, limit, onlyOriginal, cursor);
         } catch (err: any) {
           sendResponse({ success: false, error: err?.message || '获取推特动态异常' });
         }
@@ -252,7 +252,58 @@ async function updateUnreadBadge() {
     });
   }
 
-  // Robust Twitter Timeline fetcher using active x.com tab or background temporary tab
+  // Prefer direct Service Worker requests. This avoids opening a temporary x.com tab.
+  async function fetchTwitterTimelineDirect(username: string, limit: number, onlyOriginal: boolean, cursor: string): Promise<{ success: boolean; error?: string; tweetData?: unknown; userData?: unknown } | null> {
+    try {
+      const [ct0Cookie, authCookie] = await Promise.all([
+        chrome.cookies.get({ url: 'https://x.com', name: 'ct0' }).then(value => value || chrome.cookies.get({ url: 'https://twitter.com', name: 'ct0' })),
+        chrome.cookies.get({ url: 'https://x.com', name: 'auth_token' }).then(value => value || chrome.cookies.get({ url: 'https://twitter.com', name: 'auth_token' })),
+      ]);
+      if (!ct0Cookie?.value || !authCookie?.value) return null;
+      const headers: Record<string, string> = {
+        Accept: '*/*',
+        'Content-Type': 'application/json',
+        'x-csrf-token': ct0Cookie.value,
+        'x-twitter-active-user': 'yes',
+        'x-twitter-auth-type': 'OAuth2Session',
+        'x-twitter-client-language': 'zh-cn',
+      };
+      const endpoint = (operation: string, variables: Record<string, unknown>) => {
+        const features = { responsive_web_graphql_timeline_navigation_enabled: true, creator_subscriptions_tweet_preview_api_enabled: true, rweb_tipjar_consumption_enabled: true, responsive_web_profile_redirect_enabled: true };
+        return `https://x.com/i/api/graphql/${operation}?variables=${encodeURIComponent(JSON.stringify(variables))}&features=${encodeURIComponent(JSON.stringify(features))}`;
+      };
+      const userResponse = await fetch(endpoint('Gb-d6r0vxPOADdG62OEBpQ/UserByScreenName', {
+        screen_name: username,
+        withSafetyModeUserFields: true,
+      }), { headers, credentials: 'include' });
+      if (!userResponse.ok) return { success: false, error: `查询推特用户 @${username} 失败 (HTTP ${userResponse.status})` };
+      const userData: unknown = await userResponse.json();
+      if (!userData || typeof userData !== 'object' || !('data' in userData)) return { success: false, error: '推特用户接口返回数据格式异常' };
+      const userResult = userData.data;
+      if (!userResult || typeof userResult !== 'object' || !('user' in userResult)) return { success: false, error: `未在推特找到该用户 (@${username})，请核对用户名是否正确。` };
+      const userNode = userResult.user;
+      if (!userNode || typeof userNode !== 'object' || !('result' in userNode)) return { success: false, error: `未在推特找到该用户 (@${username})，请核对用户名是否正确。` };
+      const resultNode = userNode.result;
+      if (!resultNode || typeof resultNode !== 'object' || !('rest_id' in resultNode) || typeof resultNode.rest_id !== 'string') return { success: false, error: `未在推特找到该用户 (@${username})，请核对用户名是否正确。` };
+      const variables: Record<string, unknown> = {
+        userId: resultNode.rest_id,
+        count: onlyOriginal ? Math.min(Math.max(limit * 3, 25), 45) : limit,
+        includePromotedContent: false,
+        withQuickPromoteEligibilityTweetFields: true,
+        withVoice: true,
+        withV2Timeline: true,
+      };
+      if (cursor) variables.cursor = cursor;
+      const tweetResponse = await fetch(endpoint('eviprbEPLvNG88V3smUngQ/UserTweets', variables), { headers, credentials: 'include' });
+      if (!tweetResponse.ok) return { success: false, error: `获取推特动态失败 (HTTP ${tweetResponse.status})` };
+      return { success: true, tweetData: await tweetResponse.json(), userData };
+    } catch (error: unknown) {
+      console.warn('[Background] Direct Twitter request failed; trying tab fallback:', error);
+      return null;
+    }
+  }
+
+  // Fallback uses an existing x.com tab, or a temporary tab when direct cookies are unavailable.
   async function fetchTwitterTimelineViaTabOrSession(
     username: string,
     limit: number,
