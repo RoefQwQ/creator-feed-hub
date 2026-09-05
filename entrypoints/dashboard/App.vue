@@ -2317,11 +2317,11 @@ function formatTime(timestamp: number) {
         </div>
 
         <!-- Creator Cards Grid -->
-        <div v-else class="grid grid-cols-1 md:grid-cols-2 gap-4 xl:gap-5 items-start">
+        <div v-else class="columns-1 md:columns-2 gap-4 xl:gap-5">
           <div
             v-for="c in filteredCreatorsList"
             :key="c.id"
-            class="self-start p-4 bg-white dark:bg-slate-900 rounded-2xl border transition-all duration-200 shadow-sm space-y-3.5 relative overflow-hidden"
+            class="mb-4 xl:mb-5 break-inside-avoid p-3.5 bg-white dark:bg-slate-900 rounded-2xl border transition-all duration-200 shadow-sm space-y-3 relative overflow-hidden"
             :class="selectedCreatorIds.has(c.id) ? 'border-indigo-500 ring-2 ring-indigo-500/20 bg-indigo-50/20 dark:bg-indigo-950/20' : 'border-slate-200/80 dark:border-slate-800 hover:border-indigo-300 dark:hover:border-indigo-700 hover:shadow-md'"
           >
             <!-- Top Row: Avatar, Name, Stats & Actions -->
@@ -2413,7 +2413,7 @@ function formatTime(timestamp: number) {
             </div>
 
             <!-- Attached Channels Grouped by Platform -->
-            <div class="space-y-3 pt-2 border-t border-slate-100 dark:border-slate-800">
+            <div class="space-y-2.5 pt-2 border-t border-slate-100 dark:border-slate-800">
               <div class="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400 pb-1">
                 <span class="font-semibold text-slate-700 dark:text-slate-300">已绑定账号</span>
                 <button @click="openAddModal('channel', c)" class="text-indigo-600 hover:text-indigo-700 dark:text-indigo-400 font-semibold flex items-center gap-1 cursor-pointer bg-indigo-50 dark:bg-indigo-950/60 px-2 py-1 rounded-lg border border-indigo-100 dark:border-indigo-900 transition-colors">
@@ -2423,11 +2423,11 @@ function formatTime(timestamp: number) {
               </div>
 
               <!-- Grouped Platform Sections -->
-              <div class="space-y-2.5">
+              <div class="space-y-2">
                 <div
                   v-for="(chs, platform) in getCreatorGroupedChannels(c.id)"
                   :key="platform"
-                  class="rounded-xl border border-slate-200/70 dark:border-slate-800/80 bg-slate-50/70 dark:bg-slate-850/50 p-3 space-y-2"
+                  class="rounded-xl border border-slate-200/70 dark:border-slate-800/80 bg-slate-50/70 dark:bg-slate-850/50 p-2.5 space-y-1.5"
                 >
                   <!-- Platform Header within Creator -->
                   <div class="flex items-center justify-between">
@@ -2442,11 +2442,11 @@ function formatTime(timestamp: number) {
                   </div>
 
                   <!-- Account Rows within this Platform -->
-                  <div class="space-y-1.5">
+                  <div class="space-y-1">
                     <div
                       v-for="ch in chs"
                       :key="ch.id"
-                      class="flex items-center justify-between p-2 rounded-lg bg-white dark:bg-slate-800 border border-slate-200/60 dark:border-slate-700/60 text-xs shadow-2xs"
+                      class="flex items-center justify-between p-1.5 rounded-lg bg-white dark:bg-slate-800 border border-slate-200/60 dark:border-slate-700/60 text-xs shadow-2xs"
                     >
                       <div class="flex items-center gap-2 min-w-0 flex-1">
                         <!-- Account Role Badge with Quick Cycle Switch on Click -->
