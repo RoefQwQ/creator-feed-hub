@@ -20,43 +20,18 @@ export function toSecureMediaUrl(url?: string | null): string {
     trimmed = trimmed.replace(/^http:/i, 'https:');
   }
 
-  // Xiaohongshu permanent direct CDN URL normalization:
-  // Xiaohongshu web SSR embeds temporary expiring URLs with format:
-  //   https://sns-webpic-qc.xhscdn.com/{timestamp}/{hash}/{fileId}!{suffix}
-  // These expiring URLs return 403 after ~24h. Moreover, replacing the domain to sns-img-qc
-  // while keeping the /{timestamp}/{hash}/ prefix results in 404.
-  // The permanent, non-expiring URL accepted by Xiaohongshu's image CDN (sns-img-qc and ci.xiaohongshu.com)
-  // is directly: https://sns-img-qc.xhscdn.com/{fileId} (without timestamp/hash).
+  // Normalize Xiaohongshu URLs without breaking paths
   if (
     trimmed.includes('xhscdn.com') ||
     trimmed.includes('xhscdn.net') ||
     trimmed.includes('xiaohongshu.com')
   ) {
-    // 1. Check if avatar
     if (trimmed.includes('/avatar/')) {
       const m = trimmed.match(/\/avatar\/[a-zA-Z0-9_\-\.]+/);
       if (m) {
         return `https://sns-avatar-qc.xhscdn.com${m[0]}`;
       }
     }
-
-    // 2. Note cover or note image: extract fileId from the last path segment
-    try {
-      const u = new URL(trimmed);
-      const path = u.pathname;
-      // Extract the last path segment, e.g. "1040g0083228pocsrnk3g5on69nl7ojc1fp8g5do!nc_n_nwebp_prv_1"
-      const lastSegment = path.substring(path.lastIndexOf('/') + 1);
-      // Strip format suffix (!...) and query params
-      const fileId = lastSegment.split('!')[0].split('?')[0];
-
-      // A valid Xiaohongshu fileId is typically a 1040... key or a 24~40 hex/alphanumeric string
-      if (fileId && fileId.length >= 10 && !/^\d{10,14}$/.test(fileId)) {
-        return `https://sns-img-qc.xhscdn.com/${fileId}`;
-      }
-    } catch {}
-
-    // Fallback: replace legacy subdomains if URL didn't match standard path
-    trimmed = trimmed.replace(/sns-webpic(-qc|-bd|-hw)?\.xhscdn\.com/g, 'sns-img-qc.xhscdn.com');
   }
 
   return trimmed;

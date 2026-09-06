@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed } from 'vue';
-import { Bookmark, ChevronRight, Clock, ExternalLink, Film, Repeat2, Trash2 } from 'lucide-vue-next';
+import { computed, ref } from 'vue';
+import { Bookmark, ChevronRight, Clock, ExternalLink, Film, ImageOff, Repeat2, Trash2 } from 'lucide-vue-next';
 import { PLATFORM_REGISTRY, type Channel, type Creator, type Post } from '../../../src/types';
 import { toSecureMediaUrl, proxyImage } from '../../../src/utils/media';
 
@@ -28,28 +28,34 @@ const label = computed(() => props.post.channelLabel || channel.value?.label);
 const isRepost = computed(() => props.post.isRepost || props.post.content?.startsWith('RT @') || props.post.content?.includes('//转发自'));
 const secure = toSecureMediaUrl;
 
+const mediaFailedMap = ref<Record<string, boolean>>({});
+const avatarFailed = ref(false);
+
+function handleAvatarError(url: string) {
+  avatarFailed.value = true;
+  emit('avatarError', url);
+}
+
 async function handleMediaError(e: Event, originalUrl?: string) {
   const target = e.target as HTMLImageElement;
   if (!target || !originalUrl) return;
 
   const retryCount = Number(target.dataset.retryCount || 0);
-  if (retryCount >= 2) return; // Prevent infinite loop
-  target.dataset.retryCount = String(retryCount + 1);
-
-  // 1. Try permanent direct CDN URL first
-  const secureUrl = toSecureMediaUrl(originalUrl);
-  if (secureUrl && target.src !== secureUrl) {
-    target.src = secureUrl;
+  if (retryCount >= 2) {
+    mediaFailedMap.value[originalUrl] = true;
     return;
   }
+  target.dataset.retryCount = String(retryCount + 1);
 
-  // 2. Fallback: try proxyImage through background service worker
   try {
     const proxiedDataUrl = await proxyImage(originalUrl);
     if (proxiedDataUrl) {
       target.src = proxiedDataUrl;
+      return;
     }
   } catch {}
+
+  mediaFailedMap.value[originalUrl] = true;
 }
 
 const formatTime = (timestamp: number) => {
@@ -73,7 +79,7 @@ const openMedia = (url: string, type: string) => emit('media', { url, originalUr
     <div class="p-4 border-b border-slate-100 dark:border-slate-800/60 flex items-center justify-between">
       <div class="flex items-center gap-2.5 min-w-0">
         <div class="w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-800 shrink-0 flex items-center justify-center text-xs font-bold text-indigo-600 overflow-hidden border border-slate-200 dark:border-slate-700 shadow-2xs group-hover/card:scale-105 transition-transform duration-200">
-          <img v-if="avatar" :src="secure(avatar)" referrerpolicy="no-referrer" class="w-full h-full object-cover" @error="emit('avatarError', avatar)" />
+          <img v-if="avatar && !avatarFailed" :src="secure(avatar)" referrerpolicy="no-referrer" class="w-full h-full object-cover" @error="handleAvatarError(avatar)" />
           <span v-else>{{ authorName.slice(0, 1) }}</span>
         </div>
         <div class="min-w-0">
@@ -100,17 +106,87 @@ const openMedia = (url: string, type: string) => emit('media', { url, originalUr
       <h5 v-if="post.title" class="font-bold text-sm text-slate-900 dark:text-white leading-snug line-clamp-2 tracking-tight">{{ post.title }}</h5>
       <p v-if="post.content" class="text-xs text-slate-600 dark:text-slate-300 line-clamp-4 whitespace-pre-wrap leading-relaxed">{{ post.content }}</p>
       <div v-if="post.mediaList?.length" class="pt-1">
+        <!-- Single Video -->
         <div v-if="post.mediaList.length === 1 && post.mediaList[0].type === 'video'" @click.stop="openMedia(post.mediaList[0].previewUrl, 'video')" class="relative aspect-video rounded-xl overflow-hidden bg-slate-900 cursor-pointer group/vid flex items-center justify-center">
-          <img :src="secure(post.mediaList[0].previewUrl)" referrerpolicy="no-referrer" loading="lazy" class="w-full h-full object-cover opacity-90 group-hover/vid:scale-105 transition-transform duration-300" @error="handleMediaError($event, post.mediaList[0].previewUrl)" />
+          <img v-if="!mediaFailedMap[post.mediaList[0].previewUrl]" :src="secure(post.mediaList[0].previewUrl)" referrerpolicy="no-referrer" loading="lazy" class="w-full h-full object-cover opacity-90 group-hover/vid:scale-105 transition-transform duration-300" @error="handleMediaError($event, post.mediaList[0].previewUrl)" />
           <Film class="absolute w-11 h-11 p-3 rounded-full bg-white/30 backdrop-blur-xs text-white fill-white shadow-lg group-hover/vid:scale-110 transition-transform duration-200" />
         </div>
-        <div v-else-if="post.mediaList.length === 1" @click.stop="openMedia(post.mediaList[0].previewUrl, 'image')" class="relative min-h-[160px] max-h-[460px] rounded-xl overflow-hidden bg-slate-100 dark:bg-slate-800 cursor-zoom-in group/img flex items-center justify-center">
-          <img :src="secure(post.mediaList[0].previewUrl)" referrerpolicy="no-referrer" loading="lazy" class="w-full h-full max-h-[460px] object-cover group-hover/img:scale-103 transition-transform duration-300 ease-out" @error="handleMediaError($event, post.mediaList[0].previewUrl)" />
+
+        <!-- Single Image -->
+        <div v-else-if="post.mediaList.length === 1">
+          <!-- Elegant Fallback Card when image is restricted / unavailable -->
+          <div
+            v-if="mediaFailedMap[post.mediaList[0].previewUrl]"
+            class="w-full py-8 px-5 rounded-xl border border-slate-200/80 dark:border-slate-800 bg-gradient-to-b from-slate-50 to-slate-100/70 dark:from-slate-850 dark:to-slate-900/80 flex flex-col items-center justify-center text-center select-none"
+          >
+            <div class="w-10 h-10 rounded-2xl bg-white dark:bg-slate-800 shadow-xs border border-slate-200/60 dark:border-slate-700/60 flex items-center justify-center text-slate-400 dark:text-slate-400 mb-2.5">
+              <ImageOff class="w-5 h-5 stroke-[1.75]" />
+            </div>
+            <p class="text-xs font-semibold text-slate-700 dark:text-slate-200">原图暂无法直接预览</p>
+            <p class="text-[11px] text-slate-400 dark:text-slate-500 mt-1 max-w-[240px] leading-relaxed">
+              源站 CDN 访问受限或动态时间较早，可直接在原帖中查看完整内容
+            </p>
+            <a
+              :href="post.originalUrl"
+              target="_blank"
+              @click.stop
+              class="mt-3.5 inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-white dark:bg-slate-800 text-xs font-medium text-indigo-600 dark:text-indigo-400 hover:text-indigo-700 dark:hover:text-indigo-300 border border-slate-200 dark:border-slate-700 shadow-2xs hover:shadow-xs hover:border-indigo-300 dark:hover:border-indigo-700 transition-all cursor-pointer"
+            >
+              <span>直达原帖查看图片</span>
+              <ExternalLink class="w-3.5 h-3.5" />
+            </a>
+          </div>
+
+          <!-- Normal Single Image Display -->
+          <div
+            v-else
+            @click.stop="openMedia(post.mediaList[0].previewUrl, 'image')"
+            class="relative min-h-[160px] max-h-[460px] rounded-xl overflow-hidden bg-slate-100 dark:bg-slate-800 cursor-zoom-in group/img flex items-center justify-center"
+          >
+            <img
+              :src="secure(post.mediaList[0].previewUrl)"
+              referrerpolicy="no-referrer"
+              loading="lazy"
+              class="w-full h-full max-h-[460px] object-cover group-hover/img:scale-103 transition-transform duration-300 ease-out"
+              @error="handleMediaError($event, post.mediaList[0].previewUrl)"
+            />
+          </div>
         </div>
+
+        <!-- Gallery Grid (2 or more images) -->
         <div v-else :class="post.mediaList.length === 2 ? 'grid grid-cols-2 gap-2 aspect-[16/11]' : post.mediaList.length <= 4 ? 'grid grid-cols-2 gap-1.5 aspect-square' : 'grid grid-cols-3 gap-1.5'">
-          <div v-for="(media, index) in post.mediaList.slice(0, post.mediaList.length > 4 ? 6 : undefined)" :key="index" @click.stop="openMedia(media.originalUrl || media.previewUrl, media.type)" class="relative aspect-square rounded-lg overflow-hidden bg-slate-100 dark:bg-slate-800 cursor-zoom-in group/gallery">
-            <img :src="secure(media.previewUrl)" referrerpolicy="no-referrer" loading="lazy" class="w-full h-full object-cover group-hover/gallery:scale-105 transition-transform duration-300 ease-out" @error="handleMediaError($event, media.previewUrl)" />
-            <span v-if="index === 5 && post.mediaList.length > 6" class="absolute inset-0 bg-black/60 backdrop-blur-2xs flex items-center justify-center text-white font-bold text-xs">+{{ post.mediaList.length - 6 }}</span>
+          <div
+            v-for="(media, index) in post.mediaList.slice(0, post.mediaList.length > 4 ? 6 : undefined)"
+            :key="index"
+            @click.stop="!mediaFailedMap[media.previewUrl] && openMedia(media.originalUrl || media.previewUrl, media.type)"
+            class="relative aspect-square rounded-lg overflow-hidden bg-slate-100 dark:bg-slate-800 flex items-center justify-center"
+            :class="mediaFailedMap[media.previewUrl] ? 'border border-slate-200/80 dark:border-slate-800 bg-slate-50 dark:bg-slate-850' : 'cursor-zoom-in group/gallery'"
+          >
+            <!-- Miniature Fallback if thumbnail is unavailable -->
+            <div
+              v-if="mediaFailedMap[media.previewUrl]"
+              class="w-full h-full flex flex-col items-center justify-center text-slate-400 dark:text-slate-500 p-1 text-center select-none"
+              title="图片无法直接加载，可点击直达原帖查看"
+            >
+              <ImageOff class="w-4 h-4 stroke-[1.75]" />
+              <span class="text-[9px] mt-1 text-slate-400 dark:text-slate-500 scale-90">预览受限</span>
+            </div>
+            <!-- Normal Thumbnail -->
+            <template v-else>
+              <img
+                :src="secure(media.previewUrl)"
+                referrerpolicy="no-referrer"
+                loading="lazy"
+                class="w-full h-full object-cover group-hover/gallery:scale-105 transition-transform duration-300 ease-out"
+                @error="handleMediaError($event, media.previewUrl)"
+              />
+              <span
+                v-if="index === 5 && post.mediaList.length > 6"
+                class="absolute inset-0 bg-black/60 backdrop-blur-2xs flex items-center justify-center text-white font-bold text-xs"
+              >
+                +{{ post.mediaList.length - 6 }}
+              </span>
+            </template>
           </div>
         </div>
       </div>
