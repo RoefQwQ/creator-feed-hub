@@ -86,6 +86,7 @@ import {
 } from 'lucide-vue-next';
 import PostCard from './components/PostCard.vue';
 import MediaLightbox from './components/MediaLightbox.vue';
+import ImageCacheSettings from './components/ImageCacheSettings.vue';
 
 // State
 const activeTab = ref<'feed' | 'creators' | 'bookmarks' | 'settings'>('feed');
@@ -3208,6 +3209,14 @@ function formatTime(timestamp: number) {
             </div>
           </div>
         </div>
+
+        <!-- Local Disk Image Cache (File System Access API) -->
+        <ImageCacheSettings
+          :settings="settings"
+          :posts="posts"
+          :creators="creators"
+          @updateSettings="saveSettings($event)"
+        />
 
         <!-- Database Health & Cache Cleanup -->
         <div class="p-6 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">

@@ -210,6 +210,10 @@ export interface AppSettings {
   enableAutoSync?: boolean; // 是否启用后台定时自动同步（默认关闭，完全依靠手动更新）
   hideReposts?: boolean; // 默认是否隐藏转发/转自动态
   hideTextOnly?: boolean; // 是否过滤纯文字博文/仅看图文多媒体
+  // 本地图片离线磁盘缓存设置
+  enableImageCache?: boolean; // 是否启用本地图片磁盘缓存
+  imageCacheDirectoryName?: string; // 用户绑定的本地目录名称
+  imageCacheStrategy?: 'all' | 'restricted_only' | 'bookmarks_only'; // all: 全平台; restricted_only: 仅限小红书/微博等有时效签名平台; bookmarks_only: 仅收藏
 }
 
 export interface DeletedPostRecord {

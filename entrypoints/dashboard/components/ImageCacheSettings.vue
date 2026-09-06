@@ -1,0 +1,188 @@
+<script setup lang="ts">
+import { ref, onMounted } from 'vue';
+import { Folder, FolderCheck, HardDrive, DownloadCloud, AlertCircle, RefreshCw, XCircle } from 'lucide-vue-next';
+import { imageCacheService } from '../../../src/services/imageCache';
+import type { AppSettings, Post, Creator } from '../../../src/types';
+
+const props = defineProps<{
+  settings: AppSettings;
+  posts: Post[];
+  creators: Creator[];
+}>();
+
+const emit = defineEmits<{
+  updateSettings: [settings: Partial<AppSettings>];
+}>();
+
+const isReady = ref(false);
+const boundDirName = ref<string>('');
+const isBinding = ref(false);
+const isBatchCaching = ref(false);
+const batchProgress = ref({ current: 0, total: 0, success: 0 });
+
+async function checkStatus() {
+  const status = await imageCacheService.isReady();
+  isReady.value = status.ready;
+  boundDirName.value = status.dirName || props.settings.imageCacheDirectoryName || '';
+}
+
+onMounted(() => {
+  checkStatus();
+});
+
+async function handleSelectDirectory() {
+  if (isBinding.value) return;
+  isBinding.value = true;
+  try {
+    const res = await imageCacheService.bindDirectory();
+    if (res.success && res.dirName) {
+      boundDirName.value = res.dirName;
+      isReady.value = true;
+      emit('updateSettings', {
+        enableImageCache: true,
+        imageCacheDirectoryName: res.dirName,
+      });
+      alert(`【本地目录绑定成功】已选定文件夹 "${res.dirName}"。此后图片将分类归档至该目录下！`);
+    } else if (res.error && res.error !== '已取消选择目录') {
+      alert('绑定失败: ' + res.error);
+    }
+  } catch (err: any) {
+    alert('操作异常: ' + (err?.message || err));
+  } finally {
+    isBinding.value = false;
+    checkStatus();
+  }
+}
+
+async function handleUnbindDirectory() {
+  if (!confirm('确定要解绑当前的本地图片缓存目录吗？\n（已保存在您电脑上的物理图片文件不会被删除）')) {
+    return;
+  }
+  await imageCacheService.unbindDirectory();
+  isReady.value = false;
+  boundDirName.value = '';
+  emit('updateSettings', {
+    enableImageCache: false,
+    imageCacheDirectoryName: '',
+  });
+}
+
+async function handleBatchCacheExisting() {
+  if (!isReady.value) {
+    alert('请先点击上方“选择/更改本地目录”绑定一个磁盘文件夹！');
+    return;
+  }
+
+  if (isBatchCaching.value) return;
+
+  const targetPosts = props.posts.filter(p => p.mediaList && p.mediaList.length > 0);
+  if (targetPosts.length === 0) {
+    alert('当前动态列表中没有包含图片的动态');
+    return;
+  }
+
+  isBatchCaching.value = true;
+  batchProgress.value = { current: 0, total: targetPosts.length, success: 0 };
+
+  const creatorMap = new Map<string, string>();
+  props.creators.forEach(c => creatorMap.set(c.id, c.name));
+
+  try {
+    for (let i = 0; i < targetPosts.length; i++) {
+      const post = targetPosts[i];
+      batchProgress.value.current = i + 1;
+      const creatorName = creatorMap.get(post.creatorId) || '默认创作者';
+      const count = await imageCacheService.cachePost(post, creatorName);
+      batchProgress.value.success += count;
+    }
+    alert(`【离线归档完成】共扫描 ${targetPosts.length} 条图文动态，成功下载并归档 ${batchProgress.value.success} 张图片到 "${boundDirName.value}" 文件夹！`);
+  } catch (err: any) {
+    alert('批量缓存异常: ' + (err?.message || err));
+  } finally {
+    isBatchCaching.value = false;
+  }
+}
+</script>
+
+<template>
+  <div class="p-6 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+    <div class="flex items-center justify-between">
+      <div>
+        <h3 class="font-bold text-base text-slate-900 dark:text-white flex items-center gap-2">
+          <HardDrive class="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+          <span>本地磁盘图片缓存 (分博主/渠道归档)</span>
+          <span
+            class="px-2 py-0.5 rounded-full text-[10px] font-semibold border"
+            :class="isReady ? 'bg-emerald-50 text-emerald-700 border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800' : 'bg-slate-100 text-slate-500 border-slate-200 dark:bg-slate-800 dark:text-slate-400'"
+          >
+            {{ isReady ? '已授权连接' : '未配置目录' }}
+          </span>
+        </h3>
+        <p class="text-[11px] text-slate-400 mt-0.5">
+          直接在电脑硬盘中按 <code class="bg-slate-100 dark:bg-slate-800 px-1 py-0.5 rounded text-indigo-600 dark:text-indigo-400 font-mono">博主/平台/日期_动态ID</code> 自动归档原图，离线永久可查，小红书等时效签名过期永不失效
+        </p>
+      </div>
+    </div>
+
+    <!-- Directory Binding Card -->
+    <div class="p-4 rounded-xl border border-slate-200/80 dark:border-slate-800 bg-slate-50/50 dark:bg-slate-850/40 space-y-3">
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <div class="flex items-center gap-3 min-w-0">
+          <div
+            class="w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border shadow-2xs"
+            :class="isReady ? 'bg-indigo-50 dark:bg-indigo-950/50 border-indigo-200 dark:border-indigo-800 text-indigo-600 dark:text-indigo-400' : 'bg-slate-100 dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-400'"
+          >
+            <FolderCheck v-if="isReady" class="w-5 h-5" />
+            <Folder v-else class="w-5 h-5" />
+          </div>
+          <div class="min-w-0">
+            <div class="text-xs font-bold text-slate-900 dark:text-white truncate">
+              {{ boundDirName ? `当前绑定的物理目录: ${boundDirName}` : '尚未选择图片本地保存目录' }}
+            </div>
+            <div class="text-[11px] text-slate-400 mt-0.5">
+              {{ isReady ? '扩展已获得该文件夹的写入权限，浏览时将自动沉淀图片。' : '基于浏览器官方 File System Access API，由您自主决定图片存在哪个磁盘分区。' }}
+            </div>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            @click="handleSelectDirectory"
+            :disabled="isBinding"
+            class="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-xs hover:shadow transition-all cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
+          >
+            <Folder class="w-3.5 h-3.5" />
+            <span>{{ boundDirName ? '更改存储目录' : '选择本地存储目录' }}</span>
+          </button>
+          <button
+            v-if="boundDirName"
+            type="button"
+            @click="handleUnbindDirectory"
+            title="解绑目录"
+            class="p-1.5 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-400 hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950/40 transition-colors cursor-pointer"
+          >
+            <XCircle class="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+
+      <!-- Batch Cache Tool -->
+      <div v-if="isReady" class="pt-3 border-t border-slate-200/60 dark:border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-xs">
+        <div class="text-slate-500 dark:text-slate-400 text-[11px] flex items-center gap-1.5">
+          <DownloadCloud class="w-3.5 h-3.5 text-indigo-500" />
+          <span>支持将数据库中现有的所有博主图文一键离线备份至该目录</span>
+        </div>
+        <button
+          type="button"
+          @click="handleBatchCacheExisting"
+          :disabled="isBatchCaching"
+          class="px-3 py-1.5 bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-750 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 rounded-xl font-medium transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
+        >
+          <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': isBatchCaching }" />
+          <span>{{ isBatchCaching ? `正在归档 ${batchProgress.current}/${batchProgress.total}...` : '一键离线当前全部图片' }}</span>
+        </button>
+      </div>
+    </div>
+  </div>
+</template>

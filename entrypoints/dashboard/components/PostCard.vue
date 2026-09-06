@@ -3,6 +3,8 @@ import { computed, ref } from 'vue';
 import { Bookmark, ChevronRight, Clock, ExternalLink, Film, ImageOff, Repeat2, Trash2 } from 'lucide-vue-next';
 import { PLATFORM_REGISTRY, type Channel, type Creator, type Post } from '../../../src/types';
 import { toSecureMediaUrl, proxyImage, isImageFailed, markImageFailed } from '../../../src/utils/media';
+import { imageCacheService } from '../../../src/services/imageCache';
+import { onMounted } from 'vue';
 
 const props = withDefaults(defineProps<{
   post: Post;
@@ -28,14 +30,52 @@ const label = computed(() => props.post.channelLabel || channel.value?.label);
 const isRepost = computed(() => props.post.isRepost || props.post.content?.startsWith('RT @') || props.post.content?.includes('//转发自'));
 const secure = toSecureMediaUrl;
 
+// Map of resolved image URLs (local disk blob URL takes priority over remote URL)
+const localMediaUrls = ref<Record<string, string>>({});
+
 // Pre-initialize mediaFailedMap with already known failed URLs
 const mediaFailedMap = ref<Record<string, boolean>>({});
 
 // Helper to check if media is failed either locally or globally
 function isMediaFailed(url?: string): boolean {
   if (!url) return true;
+  // If we have a local cached URL, it's definitely NOT failed!
+  if (localMediaUrls.value[url]) return false;
   return Boolean(mediaFailedMap.value[url] || isImageFailed(url));
 }
+
+// Get best available URL for a media item (local disk blob URL > network URL)
+function getMediaDisplayUrl(url: string): string {
+  if (!url) return '';
+  return localMediaUrls.value[url] || secure(url);
+}
+
+// Check local disk on mount and optionally auto-cache in background
+onMounted(async () => {
+  if (!props.post.mediaList || props.post.mediaList.length === 0) return;
+
+  for (let i = 0; i < props.post.mediaList.length; i++) {
+    const item = props.post.mediaList[i];
+    const original = item.previewUrl || item.originalUrl;
+    if (!original) continue;
+
+    try {
+      const localUrl = await imageCacheService.getLocalCachedMediaUrl({
+        creatorName: authorName.value,
+        platform: props.post.platform,
+        postId: props.post.id,
+        publishedAt: props.post.publishedAt,
+        mediaIndex: i,
+        mediaUrl: original,
+      });
+
+      if (localUrl) {
+        localMediaUrls.value[original] = localUrl;
+        delete mediaFailedMap.value[original];
+      }
+    } catch {}
+  }
+});
 
 const avatarFailed = ref(false);
 
@@ -45,13 +85,33 @@ function handleAvatarError(url: string) {
   emit('avatarError', url);
 }
 
-async function handleMediaError(e: Event, originalUrl?: string) {
+async function handleMediaError(e: Event, originalUrl?: string, mediaIndex: number = 0) {
   const target = e.target as HTMLImageElement;
   if (!target || !originalUrl) return;
 
   // IMMEDIATELY hide the broken image element so the browser's native broken icon NEVER flashes
   target.style.opacity = '0';
   target.style.visibility = 'hidden';
+
+  // 1. Try reading from local disk cache first
+  try {
+    const localUrl = await imageCacheService.getLocalCachedMediaUrl({
+      creatorName: authorName.value,
+      platform: props.post.platform,
+      postId: props.post.id,
+      publishedAt: props.post.publishedAt,
+      mediaIndex,
+      mediaUrl: originalUrl,
+    });
+    if (localUrl) {
+      localMediaUrls.value[originalUrl] = localUrl;
+      target.src = localUrl;
+      target.style.opacity = '';
+      target.style.visibility = '';
+      delete mediaFailedMap.value[originalUrl];
+      return;
+    }
+  } catch {}
 
   const retryCount = Number(target.dataset.retryCount || 0);
   if (retryCount >= 1 || isImageFailed(originalUrl)) {
@@ -67,12 +127,40 @@ async function handleMediaError(e: Event, originalUrl?: string) {
       target.src = proxiedDataUrl;
       target.style.opacity = '';
       target.style.visibility = '';
+
+      // Auto save successfully proxied image to local disk cache in background
+      imageCacheService.cacheMediaItem({
+        creatorName: authorName.value,
+        platform: props.post.platform,
+        postId: props.post.id,
+        publishedAt: props.post.publishedAt,
+        mediaIndex,
+        mediaUrl: originalUrl,
+      }).catch(() => {});
+
       return;
     }
   } catch {}
 
   markImageFailed(originalUrl);
   mediaFailedMap.value[originalUrl] = true;
+}
+
+// When user image loads successfully on web, opportunistically cache it to disk
+function handleMediaLoad(originalUrl: string, mediaIndex: number = 0) {
+  if (!originalUrl || localMediaUrls.value[originalUrl]) return;
+  imageCacheService.cacheMediaItem({
+    creatorName: authorName.value,
+    platform: props.post.platform,
+    postId: props.post.id,
+    publishedAt: props.post.publishedAt,
+    mediaIndex,
+    mediaUrl: originalUrl,
+  }).then((cachedUrl) => {
+    if (cachedUrl) {
+      localMediaUrls.value[originalUrl] = cachedUrl;
+    }
+  }).catch(() => {});
 }
 
 const formatTime = (timestamp: number) => {
@@ -157,15 +245,16 @@ const openMedia = (url: string, type: string) => emit('media', { url, originalUr
           <!-- Normal Single Image Display -->
           <div
             v-else
-            @click.stop="openMedia(post.mediaList[0].previewUrl, 'image')"
+            @click.stop="openMedia(localMediaUrls[post.mediaList[0].previewUrl] || post.mediaList[0].previewUrl, 'image')"
             class="relative min-h-[160px] max-h-[460px] rounded-xl overflow-hidden bg-slate-100 dark:bg-slate-800 cursor-zoom-in group/img flex items-center justify-center"
           >
             <img
-              :src="secure(post.mediaList[0].previewUrl)"
+              :src="getMediaDisplayUrl(post.mediaList[0].previewUrl)"
               referrerpolicy="no-referrer"
               loading="lazy"
               class="w-full h-full max-h-[460px] object-cover group-hover/img:scale-103 transition-transform duration-300 ease-out"
-              @error="handleMediaError($event, post.mediaList[0].previewUrl)"
+              @load="handleMediaLoad(post.mediaList[0].previewUrl, 0)"
+              @error="handleMediaError($event, post.mediaList[0].previewUrl, 0)"
             />
           </div>
         </div>
@@ -175,7 +264,7 @@ const openMedia = (url: string, type: string) => emit('media', { url, originalUr
           <div
             v-for="(media, index) in post.mediaList.slice(0, post.mediaList.length > 4 ? 6 : undefined)"
             :key="index"
-            @click.stop="!isMediaFailed(media.previewUrl) && openMedia(media.originalUrl || media.previewUrl, media.type)"
+            @click.stop="!isMediaFailed(media.previewUrl) && openMedia(localMediaUrls[media.previewUrl] || media.originalUrl || media.previewUrl, media.type)"
             class="relative aspect-square rounded-lg overflow-hidden bg-slate-100 dark:bg-slate-800 flex items-center justify-center"
             :class="isMediaFailed(media.previewUrl) ? 'border border-slate-200/80 dark:border-slate-800 bg-slate-50 dark:bg-slate-850' : 'cursor-zoom-in group/gallery'"
           >
@@ -191,11 +280,12 @@ const openMedia = (url: string, type: string) => emit('media', { url, originalUr
             <!-- Normal Thumbnail -->
             <template v-else>
               <img
-                :src="secure(media.previewUrl)"
+                :src="getMediaDisplayUrl(media.previewUrl)"
                 referrerpolicy="no-referrer"
                 loading="lazy"
                 class="w-full h-full object-cover group-hover/gallery:scale-105 transition-transform duration-300 ease-out"
-                @error="handleMediaError($event, media.previewUrl)"
+                @load="handleMediaLoad(media.previewUrl, index)"
+                @error="handleMediaError($event, media.previewUrl, index)"
               />
               <span
                 v-if="index === 5 && post.mediaList.length > 6"
