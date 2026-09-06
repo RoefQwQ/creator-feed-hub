@@ -41,6 +41,21 @@ export function toSecureMediaUrl(url?: string | null): string {
 const imageProxyCache = new Map<string, string>();
 const pendingProxyFetches = new Map<string, Promise<string | null>>();
 
+// Global cache for URLs that have definitively failed to load / proxy
+const failedImageUrls = new Set<string>();
+
+export function isImageFailed(url?: string | null): boolean {
+  if (!url) return false;
+  return failedImageUrls.has(url) || failedImageUrls.has(toSecureMediaUrl(url));
+}
+
+export function markImageFailed(url?: string | null): void {
+  if (!url) return;
+  failedImageUrls.add(url);
+  const secureUrl = toSecureMediaUrl(url);
+  if (secureUrl) failedImageUrls.add(secureUrl);
+}
+
 /**
  * Fetch an image through the background service worker using extension host permissions
  * and custom Referer / Origin headers, returning a base64 data URL.
@@ -95,8 +110,12 @@ export async function proxyImage(url: string): Promise<string | null> {
           return resp.dataUrl;
         }
       }
+      markImageFailed(url);
+      markImageFailed(secureUrl);
       return null;
     } catch {
+      markImageFailed(url);
+      markImageFailed(secureUrl);
       return null;
     } finally {
       pendingProxyFetches.delete(secureUrl);

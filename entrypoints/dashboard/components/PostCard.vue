@@ -2,7 +2,7 @@
 import { computed, ref } from 'vue';
 import { Bookmark, ChevronRight, Clock, ExternalLink, Film, ImageOff, Repeat2, Trash2 } from 'lucide-vue-next';
 import { PLATFORM_REGISTRY, type Channel, type Creator, type Post } from '../../../src/types';
-import { toSecureMediaUrl, proxyImage } from '../../../src/utils/media';
+import { toSecureMediaUrl, proxyImage, isImageFailed, markImageFailed } from '../../../src/utils/media';
 
 const props = withDefaults(defineProps<{
   post: Post;
@@ -28,11 +28,20 @@ const label = computed(() => props.post.channelLabel || channel.value?.label);
 const isRepost = computed(() => props.post.isRepost || props.post.content?.startsWith('RT @') || props.post.content?.includes('//转发自'));
 const secure = toSecureMediaUrl;
 
+// Pre-initialize mediaFailedMap with already known failed URLs
 const mediaFailedMap = ref<Record<string, boolean>>({});
+
+// Helper to check if media is failed either locally or globally
+function isMediaFailed(url?: string): boolean {
+  if (!url) return true;
+  return Boolean(mediaFailedMap.value[url] || isImageFailed(url));
+}
+
 const avatarFailed = ref(false);
 
 function handleAvatarError(url: string) {
   avatarFailed.value = true;
+  markImageFailed(url);
   emit('avatarError', url);
 }
 
@@ -40,8 +49,13 @@ async function handleMediaError(e: Event, originalUrl?: string) {
   const target = e.target as HTMLImageElement;
   if (!target || !originalUrl) return;
 
+  // IMMEDIATELY hide the broken image element so the browser's native broken icon NEVER flashes
+  target.style.opacity = '0';
+  target.style.visibility = 'hidden';
+
   const retryCount = Number(target.dataset.retryCount || 0);
-  if (retryCount >= 2) {
+  if (retryCount >= 1 || isImageFailed(originalUrl)) {
+    markImageFailed(originalUrl);
     mediaFailedMap.value[originalUrl] = true;
     return;
   }
@@ -51,10 +65,13 @@ async function handleMediaError(e: Event, originalUrl?: string) {
     const proxiedDataUrl = await proxyImage(originalUrl);
     if (proxiedDataUrl) {
       target.src = proxiedDataUrl;
+      target.style.opacity = '';
+      target.style.visibility = '';
       return;
     }
   } catch {}
 
+  markImageFailed(originalUrl);
   mediaFailedMap.value[originalUrl] = true;
 }
 
@@ -108,7 +125,7 @@ const openMedia = (url: string, type: string) => emit('media', { url, originalUr
       <div v-if="post.mediaList?.length" class="pt-1">
         <!-- Single Video -->
         <div v-if="post.mediaList.length === 1 && post.mediaList[0].type === 'video'" @click.stop="openMedia(post.mediaList[0].previewUrl, 'video')" class="relative aspect-video rounded-xl overflow-hidden bg-slate-900 cursor-pointer group/vid flex items-center justify-center">
-          <img v-if="!mediaFailedMap[post.mediaList[0].previewUrl]" :src="secure(post.mediaList[0].previewUrl)" referrerpolicy="no-referrer" loading="lazy" class="w-full h-full object-cover opacity-90 group-hover/vid:scale-105 transition-transform duration-300" @error="handleMediaError($event, post.mediaList[0].previewUrl)" />
+          <img v-if="!isMediaFailed(post.mediaList[0].previewUrl)" :src="secure(post.mediaList[0].previewUrl)" referrerpolicy="no-referrer" loading="lazy" class="w-full h-full object-cover opacity-90 group-hover/vid:scale-105 transition-transform duration-300" @error="handleMediaError($event, post.mediaList[0].previewUrl)" />
           <Film class="absolute w-11 h-11 p-3 rounded-full bg-white/30 backdrop-blur-xs text-white fill-white shadow-lg group-hover/vid:scale-110 transition-transform duration-200" />
         </div>
 
@@ -116,7 +133,7 @@ const openMedia = (url: string, type: string) => emit('media', { url, originalUr
         <div v-else-if="post.mediaList.length === 1">
           <!-- Elegant Fallback Card when image is restricted / unavailable -->
           <div
-            v-if="mediaFailedMap[post.mediaList[0].previewUrl]"
+            v-if="isMediaFailed(post.mediaList[0].previewUrl)"
             class="w-full py-8 px-5 rounded-xl border border-slate-200/80 dark:border-slate-800 bg-gradient-to-b from-slate-50 to-slate-100/70 dark:from-slate-850 dark:to-slate-900/80 flex flex-col items-center justify-center text-center select-none"
           >
             <div class="w-10 h-10 rounded-2xl bg-white dark:bg-slate-800 shadow-xs border border-slate-200/60 dark:border-slate-700/60 flex items-center justify-center text-slate-400 dark:text-slate-400 mb-2.5">
@@ -158,13 +175,13 @@ const openMedia = (url: string, type: string) => emit('media', { url, originalUr
           <div
             v-for="(media, index) in post.mediaList.slice(0, post.mediaList.length > 4 ? 6 : undefined)"
             :key="index"
-            @click.stop="!mediaFailedMap[media.previewUrl] && openMedia(media.originalUrl || media.previewUrl, media.type)"
+            @click.stop="!isMediaFailed(media.previewUrl) && openMedia(media.originalUrl || media.previewUrl, media.type)"
             class="relative aspect-square rounded-lg overflow-hidden bg-slate-100 dark:bg-slate-800 flex items-center justify-center"
-            :class="mediaFailedMap[media.previewUrl] ? 'border border-slate-200/80 dark:border-slate-800 bg-slate-50 dark:bg-slate-850' : 'cursor-zoom-in group/gallery'"
+            :class="isMediaFailed(media.previewUrl) ? 'border border-slate-200/80 dark:border-slate-800 bg-slate-50 dark:bg-slate-850' : 'cursor-zoom-in group/gallery'"
           >
             <!-- Miniature Fallback if thumbnail is unavailable -->
             <div
-              v-if="mediaFailedMap[media.previewUrl]"
+              v-if="isMediaFailed(media.previewUrl)"
               class="w-full h-full flex flex-col items-center justify-center text-slate-400 dark:text-slate-500 p-1 text-center select-none"
               title="图片无法直接加载，可点击直达原帖查看"
             >
