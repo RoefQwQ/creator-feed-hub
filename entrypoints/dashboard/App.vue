@@ -1397,31 +1397,28 @@ async function exportBackupToFile() {
   exportBackup();
 }
 
-function handleImportFile(event: Event) {
-  const file = (event.target as HTMLInputElement).files?.[0];
+function handleImportFile(source: File | Event) {
+  const file = source instanceof File
+    ? source
+    : (source.target as HTMLInputElement | null)?.files?.[0];
   if (!file) return;
-
   const reader = new FileReader();
   reader.onload = async (e) => {
     try {
-      const data = JSON.parse(e.target?.result as string);
-      if (data.creators && Array.isArray(data.creators)) {
-        await db.creators.bulkPut(data.creators);
-      }
-      if (data.channels && Array.isArray(data.channels)) {
-        await db.channels.bulkPut(data.channels);
-      }
-      if (data.posts && Array.isArray(data.posts)) {
-        await db.posts.bulkPut(data.posts);
-      }
-      if (data.settings) {
-        await saveSettings(data.settings);
-        settings.value = await getSettings();
+      const parsed: unknown = JSON.parse(String(e.target?.result || ''));
+      if (!parsed || typeof parsed !== 'object') throw new Error('备份格式无效');
+      const data = parsed as { creators?: unknown; channels?: unknown; posts?: unknown; settings?: unknown };
+      if (Array.isArray(data.creators)) await db.creators.bulkPut(data.creators);
+      if (Array.isArray(data.channels)) await db.channels.bulkPut(data.channels);
+      if (Array.isArray(data.posts)) await db.posts.bulkPut(data.posts);
+      if (data.settings && typeof data.settings === 'object') {
+        settings.value = await saveSettings(data.settings as Partial<AppSettings>);
       }
       await reloadData();
       alert('备份恢复成功！创作者档案、各平台账号及历史动态已全部恢复。');
-    } catch (err: any) {
-      alert('解析备份失败: ' + err.message);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : '未知错误';
+      alert('解析备份失败: ' + message);
     }
   };
   reader.readAsText(file);
