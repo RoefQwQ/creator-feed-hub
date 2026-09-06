@@ -1,29 +1,19 @@
 <script setup lang="ts">
-import { ref, shallowRef, onMounted, onUnmounted, computed, watch, nextTick } from 'vue';
+import { ref, onMounted, onUnmounted, computed, watch } from 'vue';
+import { db } from '../../src/infrastructure/db/database';
+import { getSettings, saveSettings } from '../../src/infrastructure/db/settingsRepository';
+import { getDatabaseStats } from '../../src/infrastructure/db/statsService';
 import {
-  db,
-  getSettings,
-  saveSettings,
-  getDatabaseStats,
   cleanupOldPosts,
-  deletePostAndTombstone,
-  restoreDeletedPost,
-  restoreDeletedPostId,
-  restoreDeletedPostIds,
-  restoreAllDeletedPostIds,
-  permanentlyDeletePost,
-  getDeletedPostCount,
-  getDeletedPostRecords,
-  healBrokenPostMedia
-} from '../../src/db';
+  healBrokenPostMedia,
+} from '../../src/infrastructure/db/postRepository';
 import {
   PLATFORM_REGISTRY,
   type Platform,
   type Creator,
   type Channel,
   type Post,
-  type AppSettings,
-  type DeletedPostRecord
+  type AppSettings
 } from '../../src/types';
 import {
   updateChannel,
@@ -31,8 +21,8 @@ import {
   clearStaleUpdatingStatus,
   fetchChannelHistory,
   deepSyncChannel,
-  batchUpdateChannelsInterleaved
-} from '../../src/adapters';
+  batchUpdateChannelsInterleaved,
+} from '../../src/sync';
 import { parseProfileUrl } from '../../src/utils/urlParser';
 import { toSecureMediaUrl } from '../../src/utils/media';
 import {
@@ -41,80 +31,66 @@ import {
   Settings,
   Users,
   LayoutGrid,
-  ExternalLink,
   Search,
   CheckCircle2,
-  AlertCircle,
-  Clock,
   Trash2,
-  Download,
-  Upload,
   Moon,
   Sun,
-  Image as ImageIcon,
-  Film,
   Sparkles,
   Bookmark,
-  Share2,
-  Filter,
-  Eye,
-  EyeOff,
-  Link,
-  ChevronRight,
-  X,
-  Maximize2,
-  SlidersHorizontal,
-  ShieldCheck,
   ChevronDown,
-  Rss,
-  Tag,
-  Layers,
-  Key,
-  Repeat2,
+  X,
   History,
-  FolderDown,
   CheckSquare,
   Square,
-  Calendar,
-  ArrowUpDown,
   Play,
   StopCircle,
-  Edit3,
-  ImageOff,
-  Camera,
-  RotateCcw
+  RotateCcw,
+  Tag,
 } from 'lucide-vue-next';
-import PostCard from './components/PostCard.vue';
 import MediaLightbox from './components/MediaLightbox.vue';
-import ImageCacheSettings from './components/ImageCacheSettings.vue';
+import FeedView from './views/FeedView.vue';
+import CreatorsView from './views/CreatorsView.vue';
+import BookmarksView from './views/BookmarksView.vue';
+import SettingsView from './views/SettingsView.vue';
+import { useDarkMode } from './composables/useDarkMode';
+import { useDashboardData } from './composables/useDashboardData';
+import { useDeletedPosts } from './composables/useDeletedPosts';
 
 // State
 const activeTab = ref<'feed' | 'creators' | 'bookmarks' | 'settings'>('feed');
-const creators = ref<Creator[]>([]);
-const channels = ref<Channel[]>([]);
-const posts = shallowRef<Post[]>([]);
-const dbStats = ref<{
-  creatorsCount: number;
-  channelsCount: number;
-  totalPostsCount: number;
-  bookmarkedPostsCount: number;
-  storageUsageBytes: number;
-  storageQuotaBytes: number;
-}>({
-  creatorsCount: 0,
-  channelsCount: 0,
-  totalPostsCount: 0,
-  bookmarkedPostsCount: 0,
-  storageUsageBytes: 0,
-  storageQuotaBytes: 0,
+const dashboardData = useDashboardData({
+  db,
+  getSettings,
+  getDatabaseStats,
+  healBrokenPostMedia,
 });
-const settings = ref<AppSettings>({
-  theme: 'system',
-  itemsPerFetch: 10,
-  requestDelayMs: 600,
-  enableR18Blur: true,
-  autoOpenOriginalUrl: false,
+const { creators, channels, posts, dbStats, settings, reloadData: reloadFeedData } = dashboardData;
+const recycleBin = useDeletedPosts({
+  reloadData: async () => reloadData(),
+  refreshAll: async (restoreDeleted = false) => handleRefreshAll(restoreDeleted),
+  removePostFromFeed: (postId) => {
+    posts.value = posts.value.filter(post => post.id !== postId);
+  },
+  getChannels: () => channels.value,
+  channelUpdate: updateChannel,
+  itemsPerFetch: () => settings.value.itemsPerFetch,
 });
+const {
+  deletedPostCount,
+  deletedPostsList,
+  showDeletedPostsModal,
+  deletedPostsSearchQuery,
+  showSyncMenu,
+  filteredDeletedPostsList,
+  refreshDeletedPostsList,
+  handleDeletePost,
+  openDeletedPostsModal,
+  handleRestoreSingleDeleted,
+  handleRestoreAllAndSync,
+  handlePermanentlyDelete,
+  handleEmptyRecycleBin,
+} = recycleBin;
 
 // UI Controls
 const searchQuery = ref('');
@@ -124,37 +100,11 @@ const includeTags = ref<Set<string>>(new Set());
 const excludeTags = ref<Set<string>>(new Set());
 const isRefreshingAll = ref(false);
 const refreshProgress = ref({ current: 0, total: 0 });
-const isDarkMode = ref(false);
-
-// Deleted posts (tombstones) state & Sync dropdown
-const deletedPostCount = ref(0);
-const deletedPostsList = ref<DeletedPostRecord[]>([]);
-const showDeletedPostsModal = ref(false);
-const deletedPostsSearchQuery = ref('');
-const showSyncMenu = ref(false);
-
-const filteredDeletedPostsList = computed(() => {
-  const q = deletedPostsSearchQuery.value.trim().toLowerCase();
-  if (!q) return deletedPostsList.value;
-  return deletedPostsList.value.filter(item => {
-    return (
-      (item.title && item.title.toLowerCase().includes(q)) ||
-      (item.id && item.id.toLowerCase().includes(q)) ||
-      (item.platform && item.platform.toLowerCase().includes(q))
-    );
-  });
-});
-
-// Bookmarks view controls
-const bookmarkSearchQuery = ref('');
-const bookmarkSelectedPlatform = ref<string>('all');
-
-// Creator tags quick editor modal state
-const editingTagCreator = ref<Creator | null>(null);
-const editingTagInput = ref('');
+const { isDarkMode, initDarkMode, toggleDarkMode } = useDarkMode();
 
 // Hidden creators & platform sub-filters
 const hiddenCreatorIds = ref<Set<string>>(new Set());
+
 const hiddenCreatorPlatforms = ref<Record<string, string[]>>({});
 const creatorMap = computed(() => new Map(creators.value.map(creator => [creator.id, creator])));
 
@@ -291,48 +241,7 @@ function toggleExpandCreator(creatorId: string) {
   expandedCreatorIds.value = new Set(expandedCreatorIds.value);
 }
 
-// Pagination & Infinite Scroll to keep DOM lightweight while pre-rendering smoothly
-const PAGE_SIZE = 36;
-const visibleCount = ref(PAGE_SIZE);
-const infiniteScrollTrigger = ref<HTMLElement | null>(null);
-let scrollObserver: IntersectionObserver | null = null;
 const isFetchingHistory = ref<Record<string, boolean>>({});
-
-function setupScrollObserver() {
-  if (scrollObserver) {
-    scrollObserver.disconnect();
-    scrollObserver = null;
-  }
-  if (typeof window === 'undefined' || !('IntersectionObserver' in window)) return;
-
-  scrollObserver = new IntersectionObserver(
-    (entries) => {
-      const entry = entries[0];
-      if (entry && entry.isIntersecting) {
-        if (visibleCount.value < filteredPosts.value.length) {
-          visibleCount.value += PAGE_SIZE;
-        }
-      }
-    },
-    { rootMargin: '900px 0px' }
-  );
-
-  if (infiniteScrollTrigger.value) {
-    scrollObserver.observe(infiniteScrollTrigger.value);
-  }
-}
-
-watch(infiniteScrollTrigger, (el) => {
-  if (el && scrollObserver) {
-    scrollObserver.observe(el);
-  }
-});
-
-watch(activeTab, (newTab) => {
-  if (newTab === 'feed' || newTab === 'bookmarks') {
-    nextTick(setupScrollObserver);
-  }
-});
 
 onMounted(() => window.addEventListener('keydown', handleGlobalShortcut));
 onUnmounted(() => window.removeEventListener('keydown', handleGlobalShortcut));
@@ -360,8 +269,7 @@ const hideTextOnly = ref(false);
 
 watch(activeTab, async (newTab) => {
   if (newTab === 'settings') {
-    deletedPostsList.value = await getDeletedPostRecords();
-    await refreshDeletedCount();
+    await refreshDeletedPostsList();
   }
 });
 
@@ -381,35 +289,13 @@ onMounted(async () => {
     }
   }
 
-  // Explicitly default to comfortable daytime (light) mode
-  const savedTheme = localStorage.getItem('creator_feed_theme');
-  if (savedTheme === 'dark') {
-    isDarkMode.value = true;
-    document.documentElement.classList.add('dark');
-  } else {
-    isDarkMode.value = false;
-    document.documentElement.classList.remove('dark');
-  }
-
-  // Keydown listener for Lightbox ESC
+  initDarkMode();
   window.addEventListener('keydown', handleKeydown);
-
-  // Setup infinite scroll observer
-  setupScrollObserver();
-
-  // Resize listener for responsive waterfall layout
-  window.addEventListener('resize', handleResizeForWaterfall);
-
-  // Check login states
   await checkPlatformLogins();
 });
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleKeydown);
-  window.removeEventListener('resize', handleResizeForWaterfall);
-  if (scrollObserver) {
-    scrollObserver.disconnect();
-  }
 });
 
 function handleKeydown(e: KeyboardEvent) {
@@ -419,20 +305,8 @@ function handleKeydown(e: KeyboardEvent) {
 }
 
 async function reloadData() {
-  try {
-    // Auto-heal broken CDN image URLs for Xiaohongshu and other platforms in local IndexedDB
-    await healBrokenPostMedia();
-  } catch {}
-
-  creators.value = await db.creators.toArray();
-  channels.value = await db.channels.toArray();
-  posts.value = await db.posts.orderBy('publishedAt').reverse().toArray();
-  // Refresh storage statistics
-  try {
-    dbStats.value = await getDatabaseStats();
-  } catch {}
-  await refreshDeletedCount();
-  deletedPostsList.value = await getDeletedPostRecords();
+  await reloadFeedData();
+  await refreshDeletedPostsList();
 }
 
 const isHealingMedia = ref(false);
@@ -452,76 +326,6 @@ async function handleHealBrokenMedia() {
   } finally {
     isHealingMedia.value = false;
   }
-}
-
-async function refreshDeletedCount() {
-  try {
-    deletedPostCount.value = await getDeletedPostCount();
-  } catch {
-    deletedPostCount.value = 0;
-  }
-}
-
-async function handleDeletePost(post: Post) {
-  const snippet = post.title || (post.content ? post.content.slice(0, 35) : '该动态');
-  if (!confirm(`确定要删除此条动态吗？\n\n“${snippet}”\n\n提示：该动态ID将记录到本地数据库黑名单中。后续点击“同步全部”默认不会重新拉取此动态；您可在设置或同步选项中随时查看与恢复。`)) {
-    return;
-  }
-  await deletePostAndTombstone(post);
-  posts.value = posts.value.filter(p => p.id !== post.id);
-  await refreshDeletedCount();
-}
-
-async function openDeletedPostsModal() {
-  deletedPostsList.value = await getDeletedPostRecords();
-  await refreshDeletedCount();
-  deletedPostsSearchQuery.value = '';
-  showDeletedPostsModal.value = true;
-}
-
-async function handleRestoreSingleDeleted(record: DeletedPostRecord) {
-  const restoredPost = await restoreDeletedPost(record.id);
-  deletedPostsList.value = deletedPostsList.value.filter(r => r.id !== record.id);
-  await reloadData();
-  await refreshDeletedCount();
-  if (restoredPost) {
-    alert(`【动态已定向找回】\n已将动态“${restoredPost.title || '该作品'}”直接还原到动态列表中！`);
-  } else {
-    const ch = channels.value.find(c => c.id === record.channelId);
-    if (ch) {
-      await updateChannel(ch, settings.value.itemsPerFetch, true, { restoreDeleted: true });
-      await reloadData();
-    }
-    alert(`【动态已定向找回】已解除过滤并重新拉取该动态！`);
-  }
-}
-
-async function handleRestoreAllAndSync() {
-  if (deletedPostCount.value === 0) return;
-  if (!confirm(`确定要将回收站中全部 ${deletedPostCount.value} 条已删除动态定向找回并还原到动态列表中吗？`)) return;
-  await restoreAllDeletedPostIds();
-  await reloadData();
-  await refreshDeletedCount();
-  deletedPostsList.value = [];
-  showDeletedPostsModal.value = false;
-  await handleRefreshAll(true);
-  alert(`【全部找回完成】回收站动态已全部恢复并还原至动态流！`);
-}
-
-async function handlePermanentlyDelete(record: DeletedPostRecord) {
-  if (!confirm(`确定要从回收站彻底删除该记录吗？彻底删除后将无法在此定向找回。`)) return;
-  await permanentlyDeletePost(record.id);
-  deletedPostsList.value = deletedPostsList.value.filter(r => r.id !== record.id);
-  await refreshDeletedCount();
-}
-
-async function handleEmptyRecycleBin() {
-  if (deletedPostCount.value === 0) return;
-  if (!confirm(`确定要彻底清空回收站中全部 ${deletedPostCount.value} 条记录吗？清空后将无法在此定向找回。`)) return;
-  await db.deletedPostIds.clear();
-  deletedPostsList.value = [];
-  await refreshDeletedCount();
-  alert('回收站已彻底清空。');
 }
 
 const isCleaningStorage = ref(false);
@@ -551,16 +355,6 @@ function formatBytes(bytes: number): string {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
-function toggleDarkMode() {
-  isDarkMode.value = !isDarkMode.value;
-  if (isDarkMode.value) {
-    document.documentElement.classList.add('dark');
-    localStorage.setItem('creator_feed_theme', 'dark');
-  } else {
-    document.documentElement.classList.remove('dark');
-    localStorage.setItem('creator_feed_theme', 'light');
-  }
-}
 
 // All available tags
 const allTags = computed(() => {
@@ -667,30 +461,6 @@ function handleGlobalShortcut(event: KeyboardEvent) {
 }
 
 
-// Filtered Bookmarked Posts for Bookmarks View
-const filteredBookmarkedPosts = computed(() => {
-  return posts.value.filter(p => {
-    if (!p.isBookmarked) return false;
-    // Platform filter
-    if (bookmarkSelectedPlatform.value !== 'all' && p.platform !== bookmarkSelectedPlatform.value) {
-      return false;
-    }
-    // Text-only filter (hide posts without media)
-    if (hideTextOnly.value && isTextOnlyPost(p)) {
-      return false;
-    }
-    // Search query
-    if (bookmarkSearchQuery.value.trim()) {
-      const q = bookmarkSearchQuery.value.toLowerCase();
-      const matchText = (p.title || '').toLowerCase().includes(q) || p.content.toLowerCase().includes(q);
-      const creator = creatorMap.value.get(p.creatorId);
-      const matchAuthor = creator?.name.toLowerCase().includes(q);
-      if (!matchText && !matchAuthor) return false;
-    }
-    return true;
-  });
-});
-
 // Visible creators under currently selected platform and tag filter
 const visibleCreatorsForFilter = computed(() => {
   return creators.value.filter(c => {
@@ -778,92 +548,6 @@ const filteredPosts = computed(() => {
     }
     return true;
   });
-});
-
-// Paginated view for lightweight rendering
-const paginatedPosts = computed(() => {
-  return filteredPosts.value.slice(0, visibleCount.value);
-});
-
-function loadMore() {
-  visibleCount.value += PAGE_SIZE;
-}
-
-// ===== Masonry Waterfall Layout: Height-Balanced Column Distribution =====
-const windowWidth = ref(typeof window !== 'undefined' ? window.innerWidth : 1200);
-const columnCount = computed(() => {
-  if (windowWidth.value < 768) return 1;   // mobile: single column
-  if (windowWidth.value < 1280) return 2;  // tablet: 2 columns
-  return 3;                                 // desktop: 3 columns
-});
-
-function handleResizeForWaterfall() {
-  windowWidth.value = window.innerWidth;
-}
-
-/**
- * Estimate the card render height in virtual units based on title, content length, and media count.
- * This guarantees that tall posts (like long single-image photo shoots) don't create deep voids in adjacent columns.
- */
-function estimatePostHeight(p: Post): number {
-  let h = 90; // Header avatar + meta info + padding
-  if (p.title) h += 28;
-  if (p.content) {
-    const lines = Math.min(Math.ceil(p.content.length / 32), 4);
-    h += lines * 18;
-  }
-  if (p.mediaList?.length) {
-    if (p.mediaList.length === 1) {
-      h += p.mediaList[0].type === 'video' ? 210 : 320;
-    } else if (p.mediaList.length === 2) {
-      h += 220;
-    } else {
-      h += 260;
-    }
-  }
-  h += 40; // Footer timestamp + direct link bar
-  return h;
-}
-
-// Distribute posts into columns using greedy shortest-column balancing for Feed waterfall
-const feedColumns = computed(() => {
-  const count = columnCount.value;
-  const cols: Post[][] = Array.from({ length: count }, () => []);
-  const colHeights = new Array(count).fill(0);
-
-  paginatedPosts.value.forEach((post) => {
-    // Find the current shortest column
-    let minCol = 0;
-    for (let c = 1; c < count; c++) {
-      if (colHeights[c] < colHeights[minCol]) {
-        minCol = c;
-      }
-    }
-    cols[minCol].push(post);
-    colHeights[minCol] += estimatePostHeight(post) + 20; // 20px gap
-  });
-
-  return cols;
-});
-
-// Distribute posts into columns using greedy shortest-column balancing for Bookmarks waterfall
-const bookmarkColumns = computed(() => {
-  const count = columnCount.value;
-  const cols: Post[][] = Array.from({ length: count }, () => []);
-  const colHeights = new Array(count).fill(0);
-
-  filteredBookmarkedPosts.value.forEach((post) => {
-    let minCol = 0;
-    for (let c = 1; c < count; c++) {
-      if (colHeights[c] < colHeights[minCol]) {
-        minCol = c;
-      }
-    }
-    cols[minCol].push(post);
-    colHeights[minCol] += estimatePostHeight(post) + 20;
-  });
-
-  return cols;
 });
 
 // Refresh all channels using multi-round interleaved round-robin pacing across platforms
@@ -1813,6 +1497,125 @@ function formatTime(timestamp: number) {
   if (diff < 7 * d) return `${Math.floor(diff / d)} 天前`;
   return new Date(timestamp).toLocaleDateString('zh-CN');
 }
+// ==================== VIEW CONTEXT WIRING ====================
+// Feed/creators/bookmarks/settings contexts expose the exact state + action
+// handles the extracted view components require; no logic duplicated here.
+const feedContext = computed(() => ({
+  searchQuery: searchQuery.value,
+  selectedPlatform: selectedPlatform.value,
+  PLATFORM_REGISTRY,
+  platformPostCounts: platformPostCounts.value,
+  repostsCount: repostsCount.value,
+  textOnlyCount: textOnlyCount.value,
+  hideReposts: hideReposts.value,
+  hideTextOnly: hideTextOnly.value,
+  allTags: allTags.value,
+  includeTags: includeTags.value,
+  excludeTags: excludeTags.value,
+  creators: creators.value,
+  channels: channels.value,
+  filteredPosts: filteredPosts.value,
+  visibleCreatorsForFilter: visibleCreatorsForFilter.value,
+  hiddenCreatorsInFilterCount: hiddenCreatorsInFilterCount.value,
+  hiddenCreatorIds: hiddenCreatorIds.value,
+  expandedCreatorIds: expandedCreatorIds.value,
+  hiddenCreatorPlatforms: hiddenCreatorPlatforms.value,
+  lightboxMedia: lightboxMedia.value,
+  toggleHideReposts,
+  toggleHideTextOnly,
+  cycleTagFilter,
+  clearAllTagFilters,
+  getTagFilterState,
+  loadDemoData,
+  openAddModal,
+  toggleBookmarkPost,
+  handleDeletePost,
+  markPostRead,
+  handleAvatarError,
+  unhideAllCreators,
+  toggleExpandCreator,
+  toggleHideCreator,
+  toggleHideCreatorPlatform,
+  resetCreatorHiddenPlatforms,
+  getCreatorAvatar,
+  getCreatorPlatforms,
+}));
+
+const creatorsContext = computed(() => ({
+  creators: creators.value,
+  channels: channels.value,
+  creatorPostCountMap: creatorPostCountMap.value,
+  creatorCountByPlatform: creatorCountByPlatform.value,
+}));
+
+const bookmarksContext = computed(() => ({
+  posts: posts.value,
+  creators: creators.value,
+  channels: channels.value,
+  hideTextOnly: hideTextOnly.value,
+  onGoToFeed: () => { activeTab.value = 'feed'; },
+  onToggleBookmark: toggleBookmarkPost,
+  onDelete: handleDeletePost,
+  onRead: markPostRead,
+  onOpenMedia: (media: { url: string; originalUrl?: string; type: string; title?: string }) => { lightboxMedia.value = media; },
+  onAvatarError: handleAvatarError,
+}));
+
+const settingsContext = computed(() => ({
+  settings: settings.value,
+  posts: posts.value,
+  creators: creators.value,
+  dbStats: dbStats.value,
+  platformLoginStatus: platformLoginStatus.value,
+  currentRplayToken: currentRplayToken.value,
+  deletedPostCount: deletedPostCount.value,
+  deletedPostsList: deletedPostsList.value,
+  filteredDeletedPostsList: filteredDeletedPostsList.value,
+  deletedPostsSearchQuery: deletedPostsSearchQuery.value,
+  isHealingMedia: isHealingMedia.value,
+  isCleaningStorage: isCleaningStorage.value,
+  onAddSource: () => openAddModal('new', undefined, 'https://'),
+  onCheckPlatformLogins: checkPlatformLogins,
+  onSyncRplayFromTab: syncRplayFromTab,
+  onPromptManualRplayToken: promptManualRplayToken,
+  onExportBackupToFile: exportBackupToFile,
+  onExportBackup: exportBackup,
+  onImportFile: handleImportFile,
+  onLoadDemoData: loadDemoData,
+  onUpdateSettings: updateDashboardSettings,
+  onNotifyAutoSyncChanged: () => { chrome.runtime?.sendMessage?.({ type: 'UPDATE_AUTO_SYNC' }); },
+  onRefresh: reloadData,
+  onHealBrokenMedia: handleHealBrokenMedia,
+  onCleanupPosts: handleCleanupPosts,
+  onRestoreAll: handleRestoreAllAndSync,
+  onEmptyRecycleBin: handleEmptyRecycleBin,
+  onRestoreOne: handleRestoreSingleDeleted,
+  onPermanentDelete: handlePermanentlyDelete,
+  onSearchDeleted: (q: string) => { deletedPostsSearchQuery.value = q; },
+}));
+async function updateDashboardSettings(patch: Partial<AppSettings>) {
+  settings.value = await saveSettings(patch);
+}
+
+// CreatorsView emits its action intents; map them to the App-level handlers.
+function onCreatorsAdd(payload: { mode: 'new' | 'channel'; creator?: Creator | null }) {
+  openAddModal(payload.mode, payload.creator ?? undefined);
+}
+function onCreatorsDeepSync(payload: { creator: Creator; channelId?: string }) {
+  openDeepSyncModal(payload.creator, payload.channelId);
+}
+function onCreatorsRefreshChannel(payload: { channel: Channel; force: boolean }) {
+  handleRefreshChannel(payload.channel, payload.force);
+}
+async function onCreatorsBatchRefresh(creatorIds: string[]) {
+  selectedCreatorIds.value = new Set(creatorIds);
+  await batchRefreshSelectedCreators();
+}
+async function onCreatorsBatchDelete(creatorIds: string[]) {
+  selectedCreatorIds.value = new Set(creatorIds);
+  await batchDeleteSelectedCreators();
+}
+
 </script>
 
 <template>
@@ -1970,1470 +1773,44 @@ function formatTime(timestamp: number) {
         </div>
       </div>
     </header>
-
     <!-- Main Container -->
     <main class="flex-1 w-full max-w-[98%] 2xl:max-w-[96%] mx-auto px-3 sm:px-6 py-5">
 
-      <section v-if="activeTab === 'feed'" class="flex flex-col lg:flex-row items-start gap-4 xl:gap-5">
-
-        <!-- 1. LEFT SIDEBAR: Platform, Tags & Filters Navigation -->
-        <aside class="w-full lg:w-48 xl:w-52 shrink-0 space-y-3.5 lg:sticky lg:top-20">
-          <!-- Search input -->
-          <div class="p-3 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 shadow-2xs">
-            <div class="relative">
-              <Search class="absolute left-3 top-2.5 w-3.5 h-3.5 text-slate-400" />
-              <input
-                v-model="searchQuery"
-                type="text"
-                placeholder="搜索内容或创作者..."
-                class="w-full pl-8 pr-3 py-1.5 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs outline-none focus:ring-1 focus:ring-indigo-500 text-slate-800 dark:text-slate-200 placeholder-slate-400"
-              />
-            </div>
-          </div>
-
-          <!-- Platform Navigation Menu -->
-          <div class="p-3 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 shadow-2xs space-y-1">
-            <div class="text-[11px] font-bold text-slate-400 uppercase tracking-wider px-2 py-1 flex items-center justify-between">
-              <span>平台</span>
-              <span class="text-[10px] font-mono font-normal">{{ Object.keys(PLATFORM_REGISTRY).length }} 个平台</span>
-            </div>
-
-            <!-- All Platforms Button -->
-            <button
-              @click="selectedPlatform = 'all'"
-              :class="selectedPlatform === 'all' ? 'bg-indigo-50 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 font-bold border-indigo-200 dark:border-indigo-800 shadow-2xs' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 border-transparent'"
-              class="w-full flex items-center justify-between px-3 py-2 text-xs rounded-xl border transition-all cursor-pointer"
-            >
-              <div class="flex items-center gap-2">
-                <LayoutGrid class="w-4 h-4" />
-                <span>全部</span>
-              </div>
-              <span class="text-[10px] px-1.5 py-0.2 rounded-full font-mono bg-slate-200/70 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
-                {{ platformPostCounts['all'] || 0 }}
-              </span>
-            </button>
-
-            <!-- Each Platform Button -->
-            <button
-              v-for="(meta, key) in PLATFORM_REGISTRY"
-              :key="key"
-              @click="selectedPlatform = key"
-              :class="selectedPlatform === key ? 'bg-indigo-50 text-indigo-700 dark:bg-indigo-950/60 dark:text-indigo-300 font-bold border-indigo-200 dark:border-indigo-800 shadow-2xs' : 'text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 border-transparent'"
-              class="w-full flex items-center justify-between px-3 py-2 text-xs rounded-xl border transition-all cursor-pointer"
-            >
-              <div class="flex items-center gap-2 truncate">
-                <span class="w-2.5 h-2.5 rounded-full shrink-0" :style="{ backgroundColor: meta.color }"></span>
-                <span class="truncate">{{ meta.name }}</span>
-              </div>
-              <span
-                v-if="platformPostCounts[key]"
-                class="text-[10px] px-1.5 py-0.2 rounded-full font-mono bg-slate-200/70 dark:bg-slate-700 text-slate-600 dark:text-slate-300"
-              >
-                {{ platformPostCounts[key] }}
-              </span>
-            </button>
-          </div>
-
-          <!-- Content Preferences & Tag Filter -->
-          <div class="p-3 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 shadow-2xs space-y-3">
-            <!-- Content Preferences Buttons -->
-            <div class="space-y-1.5">
-              <div class="text-[11px] font-bold text-slate-400 uppercase tracking-wider px-2 py-0.5">
-                筛选
-              </div>
-              <!-- Repost Toggle Button -->
-              <button
-                @click="toggleHideReposts"
-                class="w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition-all cursor-pointer border"
-                :class="hideReposts ? 'bg-amber-50 text-amber-800 border-amber-300 dark:bg-amber-950/60 dark:text-amber-300 dark:border-amber-700 font-semibold shadow-2xs' : 'bg-slate-50 dark:bg-slate-800/60 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800'"
-              >
-                <div class="flex items-center gap-2">
-                  <Repeat2 class="w-3.5 h-3.5" :class="{ 'text-amber-600 dark:text-amber-400': hideReposts }" />
-                  <span>{{ hideReposts ? '仅原创' : '含转发' }}</span>
-                </div>
-                <span
-                  v-if="repostsCount > 0"
-                  class="text-[10px] px-1.5 py-0.2 rounded-full font-mono"
-                  :class="hideReposts ? 'bg-amber-200/80 dark:bg-amber-900 text-amber-800 dark:text-amber-200' : 'bg-slate-200 dark:bg-slate-700 text-slate-500 dark:text-slate-400'"
-                >
-                  {{ repostsCount }}
-                </span>
-              </button>
-
-              <!-- Text-only Post Filter Toggle Button -->
-              <button
-                @click="toggleHideTextOnly"
-                class="w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-medium transition-all cursor-pointer border"
-                :class="hideTextOnly ? 'bg-indigo-50 text-indigo-800 border-indigo-300 dark:bg-indigo-950/60 dark:text-indigo-300 dark:border-indigo-700 font-semibold shadow-2xs' : 'bg-slate-50 dark:bg-slate-800/60 text-slate-600 dark:text-slate-300 border-slate-200 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800'"
-                :title="hideTextOnly ? '当前已过滤无图文/视频的纯文字博文，点击恢复展示' : '点击过滤纯文字博文，只看包含图片/视频的动态'"
-              >
-                <div class="flex items-center gap-2">
-                  <ImageIcon v-if="hideTextOnly" class="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
-                  <ImageOff v-else class="w-3.5 h-3.5 text-slate-400" />
-                  <span>{{ hideTextOnly ? '仅图文' : '含纯文字' }}</span>
-                </div>
-                <span
-                  v-if="textOnlyCount > 0"
-                  class="text-[10px] px-1.5 py-0.2 rounded-full font-mono"
-                  :class="hideTextOnly ? 'bg-indigo-200/80 dark:bg-indigo-900 text-indigo-800 dark:text-indigo-200' : 'bg-slate-200 dark:bg-slate-700 text-slate-500 dark:text-slate-400'"
-                >
-                  {{ textOnlyCount }}
-                </span>
-              </button>
-            </div>
-
-            <!-- Tags Filter (Tri-state: Include / Exclude / Neutral) -->
-            <div v-if="allTags.length > 0">
-              <div class="text-[11px] font-bold text-slate-400 uppercase tracking-wider px-2 py-1 flex items-center justify-between">
-                <div class="flex items-center gap-1">
-                  <Tag class="w-3 h-3" />
-                  <span>标签</span>
-                </div>
-                <button
-                  v-if="includeTags.size > 0 || excludeTags.size > 0"
-                  type="button"
-                  @click="clearAllTagFilters"
-                  class="text-[10px] text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer lowercase"
-                >
-                  清除
-                </button>
-              </div>
-              <p class="text-[10px] text-slate-400 dark:text-slate-500 px-2 pb-1">
-                点击循环：包含 → 排除 → 全部
-              </p>
-              <div class="flex flex-wrap gap-1.5 pt-1 px-1">
-                <button
-                  type="button"
-                  @click="clearAllTagFilters"
-                  :class="includeTags.size === 0 && excludeTags.size === 0 ? 'bg-indigo-600 text-white font-semibold shadow-2xs' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'"
-                  class="px-2.5 py-1 text-[11px] rounded-lg transition-colors cursor-pointer"
-                >
-                  全部
-                </button>
-                <button
-                  v-for="t in allTags"
-                  :key="t"
-                  type="button"
-                  @click="cycleTagFilter(t)"
-                  :class="[
-                    getTagFilterState(t) === 'include'
-                      ? 'bg-indigo-600 text-white font-bold shadow-2xs'
-                      : getTagFilterState(t) === 'exclude'
-                      ? 'bg-rose-600 text-white font-bold shadow-2xs line-through'
-                      : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'
-                  ]"
-                  class="px-2.5 py-1 text-[11px] rounded-lg transition-all cursor-pointer flex items-center gap-1"
-                  :title="getTagFilterState(t) === 'include' ? '当前：正向包含（点击切换为反选排除）' : getTagFilterState(t) === 'exclude' ? '当前：反向排除（点击取消选择）' : '点击设置为正向包含(+)'"
-                >
-                  <span v-if="getTagFilterState(t) === 'include'" class="text-[10px] font-black">+</span>
-                  <span v-else-if="getTagFilterState(t) === 'exclude'" class="text-[10px] font-black">−</span>
-                  <span>#{{ t }}</span>
-                </button>
-              </div>
-            </div>
-          </div>
-        </aside>
-
-        <!-- 2. CENTER MAIN CONTENT: Feed Posts Stream -->
-        <div class="flex-1 min-w-0 w-full space-y-4">
-
-          <!-- Empty State -->
-          <div v-if="filteredPosts.length === 0" class="text-center py-20 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800">
-            <div class="w-16 h-16 mx-auto mb-4 rounded-2xl bg-indigo-50 dark:bg-indigo-950/50 flex items-center justify-center text-indigo-500">
-              <LayoutGrid class="w-8 h-8" />
-            </div>
-            <h3 class="text-base font-bold text-slate-800 dark:text-slate-200 mb-1">暂无匹配动态</h3>
-            <p class="text-xs text-slate-500 max-w-md mx-auto mb-5 leading-relaxed">
-              {{ creators.length === 0 ? '还没有关注任何创作者。试试浏览创作者主页时点击右上角扩展图标快速关注，或导入演示数据体验。' : '当前筛选下没有匹配的内容，试试同步最新动态或调整筛选。' }}
-            </p>
-            <div class="flex justify-center gap-3">
-              <button
-                v-if="creators.length === 0"
-                @click="loadDemoData"
-                class="px-4 py-2 text-xs font-semibold bg-indigo-50 hover:bg-indigo-100 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-300 rounded-xl transition-colors cursor-pointer"
-              >
-                导入演示数据
-              </button>
-              <button
-                @click="openAddModal('new')"
-                class="px-4 py-2 text-xs font-semibold bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl shadow-xs transition-colors cursor-pointer"
-              >
-                关注第一位创作者
-              </button>
-            </div>
-          </div>
-
-          <!-- Multi-Platform Responsive Masonry Waterfall Layout -->
-          <div v-else class="space-y-6">
-          <div class="flex gap-4 xl:gap-5 items-start">
-            <div
-              v-for="(colPosts, colIdx) in feedColumns"
-              :key="'feed-col-' + colIdx"
-              class="flex-1 flex flex-col gap-4 xl:gap-5 min-w-0"
-            >
-              <PostCard
-                v-for="post in colPosts"
-                :key="post.id"
-                :post="post"
-                :creators="creators"
-                :channels="channels"
-                @bookmark="toggleBookmarkPost"
-                @delete="handleDeletePost"
-                @read="markPostRead"
-                @media="lightboxMedia = $event"
-                @avatar-error="handleAvatarError"
-              />
-            </div>
-          </div>
-
-          <!-- Infinite Scroll Sentinel & Pagination Indicator -->
-          <div ref="infiniteScrollTrigger" class="py-8 flex flex-col items-center justify-center text-xs text-slate-400">
-            <div v-if="filteredPosts.length > visibleCount" class="flex items-center gap-2 text-indigo-600 dark:text-indigo-400 font-medium bg-indigo-50/70 dark:bg-indigo-950/40 px-4 py-2 rounded-full border border-indigo-100 dark:border-indigo-900/60 shadow-2xs">
-              <RefreshCw class="w-3.5 h-3.5 animate-spin" />
-              <span>加载更多 · 已显示 {{ visibleCount }} / {{ filteredPosts.length }}</span>
-            </div>
-            <div v-else-if="filteredPosts.length > 0" class="flex items-center gap-2 text-slate-400 dark:text-slate-500 py-2">
-              <CheckCircle2 class="w-3.5 h-3.5 text-emerald-500" />
-              <span>已显示全部 {{ filteredPosts.length }} 条动态</span>
-            </div>
-          </div>
-        </div>
-        </div>
-
-        <!-- 3. RIGHT SIDEBAR: Creator Selection & Direct Platform Filtering ("成套的右侧边栏") -->
-        <aside class="w-full lg:w-64 xl:w-68 shrink-0 space-y-3.5 lg:sticky lg:top-20">
-          <div class="p-3.5 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 shadow-2xs space-y-3">
-            <!-- Sidebar Header -->
-            <div class="flex items-center justify-between px-1">
-              <div class="flex items-center gap-2">
-                <Users class="w-4 h-4 text-indigo-500" />
-                <span class="text-xs font-bold text-slate-800 dark:text-slate-200">
-                  {{ selectedPlatform === 'all' ? '创作者' : `${PLATFORM_REGISTRY[selectedPlatform]?.name || selectedPlatform} 创作者` }}
-                </span>
-                <span class="text-[10px] px-1.5 py-0.2 rounded-full font-mono bg-slate-100 dark:bg-slate-800 text-slate-500">
-                  {{ visibleCreatorsForFilter.length }}
-                </span>
-              </div>
-              <div v-if="hiddenCreatorsInFilterCount > 0" class="flex items-center gap-1.5">
-                <span class="text-[10px] text-amber-600 dark:text-amber-400 font-medium">
-                  隐藏 {{ hiddenCreatorsInFilterCount }} 人
-                </span>
-                <button
-                  type="button"
-                  @click="unhideAllCreators"
-                  class="text-[10px] text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer font-medium"
-                >
-                  全部显示
-                </button>
-              </div>
-            </div>
-
-            <!-- Hint text -->
-            <div class="text-[11px] text-slate-400 px-1 leading-snug">
-              点击展开选择显示/隐藏的平台，点击 👁 隐藏创作者
-            </div>
-
-            <!-- Empty Creators under filter -->
-            <div
-              v-if="visibleCreatorsForFilter.length === 0"
-              class="text-center py-6 text-xs text-slate-400 bg-slate-50/50 dark:bg-slate-850/50 rounded-xl border border-dashed border-slate-200 dark:border-slate-800"
-            >
-              当前筛选下无创作者
-            </div>
-
-            <!-- Creator Cards List in Right Sidebar -->
-            <div v-else class="space-y-2 max-h-[calc(100vh-210px)] overflow-y-auto pr-0.5 scrollbar-thin">
-              <div
-                v-for="c in visibleCreatorsForFilter"
-                :key="c.id"
-                class="rounded-xl border transition-all select-none overflow-hidden"
-                :class="[
-                  hiddenCreatorIds.has(c.id)
-                    ? 'bg-slate-100/60 dark:bg-slate-800/30 border-slate-200 dark:border-slate-800 opacity-60'
-                    : 'bg-slate-50/70 dark:bg-slate-850 border-slate-200/80 dark:border-slate-800 shadow-2xs hover:border-indigo-300 dark:hover:border-indigo-700'
-                ]"
-              >
-                <!-- Creator Card Header (Click to expand/fold inline directly) -->
-                <div
-                  @click="toggleExpandCreator(c.id)"
-                  class="flex items-center justify-between p-2.5 cursor-pointer hover:bg-slate-100/60 dark:hover:bg-slate-800/60 transition-colors gap-2"
-                  :title="hiddenCreatorIds.has(c.id) ? '点击眼睛恢复显示该创作者' : '点击展开渠道选择，点击眼睛隐藏此创作者'"
-                >
-                  <!-- Left: Avatar & Name -->
-                  <div class="flex items-center gap-2.5 min-w-0">
-                    <div class="w-8 h-8 rounded-full overflow-hidden shrink-0 border border-slate-200/80 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-xs font-bold text-slate-500">
-                      <img
-                        v-if="getCreatorAvatar(c)"
-                        :src="getCreatorAvatar(c)"
-                        referrerpolicy="no-referrer"
-                        class="w-full h-full object-cover"
-                        @error="handleAvatarError(getCreatorAvatar(c))"
-                      />
-                      <span v-else>{{ (c.name || 'C').slice(0, 1) }}</span>
-                    </div>
-
-                    <div class="min-w-0">
-                      <div
-                        class="text-xs font-bold text-slate-800 dark:text-slate-200 truncate max-w-[130px]"
-                        :class="{ 'line-through text-slate-400': hiddenCreatorIds.has(c.id) }"
-                        :title="c.name"
-                      >
-                        {{ c.name }}
-                      </div>
-                      <div class="flex items-center gap-1.5 text-[10px] text-slate-400 mt-0.5">
-                        <span>{{ getCreatorPlatforms(c.id).length }} 个平台</span>
-                        <span
-                          v-if="selectedPlatform === 'all' && hiddenCreatorPlatforms[c.id]?.length"
-                          class="px-1.5 py-0.2 rounded-full bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400 font-medium text-[9px] border border-rose-200/60 dark:border-rose-900/60"
-                        >
-                          隐藏 {{ hiddenCreatorPlatforms[c.id].length }} 平台
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-
-                  <!-- Right: Eye Toggle Button + Chevron Indicator -->
-                  <div class="flex items-center gap-1 shrink-0">
-                    <button
-                      type="button"
-                      @click.stop="toggleHideCreator(c.id)"
-                      class="p-1 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 transition-colors cursor-pointer"
-                      :title="hiddenCreatorIds.has(c.id) ? '恢复显示该创作者' : '隐藏该创作者的所有动态'"
-                    >
-                      <EyeOff v-if="hiddenCreatorIds.has(c.id)" class="w-3.5 h-3.5 text-rose-500" />
-                      <Eye v-else class="w-3.5 h-3.5 text-slate-400 hover:text-indigo-600" />
-                    </button>
-                    <div
-                      class="p-0.5 text-slate-400 transition-transform duration-200"
-                      :class="{ 'rotate-180': expandedCreatorIds.has(c.id) }"
-                    >
-                      <ChevronDown class="w-3.5 h-3.5" />
-                    </div>
-                  </div>
-                </div>
-
-                <!-- INLINE EXPANSION: 直接展开选择渠道 (点开直接选择，非二级菜单弹窗) -->
-                <div
-                  v-if="expandedCreatorIds.has(c.id)"
-                  class="p-2.5 pt-2 bg-slate-100/70 dark:bg-slate-900/70 border-t border-slate-200/60 dark:border-slate-800 space-y-2 text-xs animate-in fade-in duration-150"
-                >
-                  <div class="flex items-center justify-between text-[10px] text-slate-400 px-0.5">
-                    <span>选择显示的平台：</span>
-                    <button
-                      v-if="hiddenCreatorPlatforms[c.id]?.length"
-                      type="button"
-                      @click.stop="resetCreatorHiddenPlatforms(c.id)"
-                      class="text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer font-medium"
-                    >
-                      全部显示
-                    </button>
-                  </div>
-
-                  <!-- Platform items of this creator -->
-                  <div v-if="getCreatorPlatforms(c.id).length === 0" class="text-center py-2 text-[11px] text-slate-400">
-                    暂无绑定账号
-                  </div>
-                  <div v-else class="space-y-1.5">
-                    <div
-                      v-for="pKey in getCreatorPlatforms(c.id)"
-                      :key="pKey"
-                      @click.stop="toggleHideCreatorPlatform(c.id, pKey)"
-                      class="flex items-center justify-between px-2.5 py-1.5 rounded-lg border transition-all cursor-pointer"
-                      :class="hiddenCreatorPlatforms[c.id]?.includes(pKey)
-                        ? 'bg-rose-50/80 dark:bg-rose-950/40 border-rose-200 dark:border-rose-900/50 text-rose-700 dark:text-rose-300'
-                        : 'bg-white dark:bg-slate-800 border-slate-200/80 dark:border-slate-700/80 text-slate-700 dark:text-slate-200 hover:border-indigo-300'"
-                    >
-                      <div class="flex items-center gap-2 truncate min-w-0">
-                        <span
-                          class="w-2.5 h-2.5 rounded-full shrink-0"
-                          :style="{ backgroundColor: PLATFORM_REGISTRY[pKey]?.color || '#6366f1' }"
-                        ></span>
-                        <div class="min-w-0 truncate">
-                          <span class="font-semibold text-[11px] truncate">
-                            {{ PLATFORM_REGISTRY[pKey]?.name || pKey }}
-                          </span>
-                          <span class="text-[9px] text-slate-400 ml-1 truncate">
-                            {{ channels.filter(ch => ch.creatorId === c.id && ch.platform === pKey).map(ch => ch.displayName || ch.label || ch.accountId).join(', ') }}
-                          </span>
-                        </div>
-                      </div>
-
-                      <!-- Direct status toggle pill -->
-                      <div class="flex items-center gap-1 shrink-0 text-[10px] font-medium ml-2">
-                        <span v-if="hiddenCreatorPlatforms[c.id]?.includes(pKey)" class="flex items-center gap-0.5 text-rose-600 dark:text-rose-400 px-1.5 py-0.5 rounded-md bg-rose-100/70 dark:bg-rose-950/80 border border-rose-200 dark:border-rose-800">
-                          <EyeOff class="w-3 h-3" />
-                          <span>已隐藏</span>
-                        </span>
-                        <span v-else class="flex items-center gap-0.5 text-emerald-600 dark:text-emerald-400 px-1.5 py-0.5 rounded-md bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800">
-                          <Eye class="w-3 h-3" />
-                          <span>显示中</span>
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </aside>
-      </section>
-
-      <section v-else-if="activeTab === 'creators'" class="space-y-6">
-        <!-- Header & Action Toolbar -->
-        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div>
-            <div class="flex items-center gap-2">
-              <h2 class="font-bold text-lg text-slate-900 dark:text-white">关注管理</h2>
-              <span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-100 dark:border-indigo-900">
-                {{ filteredCreatorsList.length }} / {{ creators.length }} 位
-              </span>
-            </div>
-            <p class="text-xs text-slate-500 mt-0.5">管理关注的创作者和绑定的各平台账号</p>
-          </div>
-          <div class="flex items-center gap-2">
-            <button
-              @click="isBatchMode = !isBatchMode; if (!isBatchMode) selectedCreatorIds = new Set();"
-              :class="isBatchMode ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white dark:bg-slate-900 text-slate-700 dark:text-slate-200 border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800'"
-              class="flex items-center gap-1.5 px-3 py-2 border rounded-xl text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
-            >
-              <CheckSquare class="w-3.5 h-3.5" />
-              <span>{{ isBatchMode ? '完成' : '批量' }}</span>
-            </button>
-            <button
-              @click="openAddModal('new')"
-              class="flex items-center gap-1.5 px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-xs transition-colors cursor-pointer"
-            >
-              <Plus class="w-4 h-4" />
-              <span>+ 新建</span>
-            </button>
-          </div>
-        </div>
-
-        <!-- Filter & Search Bar -->
-        <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 p-4 shadow-2xs space-y-3">
-          <div class="flex flex-col md:flex-row items-stretch md:items-center gap-3">
-            <!-- Search Input -->
-            <div class="relative flex-1">
-              <Search class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-              <input
-                v-model="creatorSearch"
-                type="text"
-                placeholder="搜索创作者..."
-                class="w-full pl-9 pr-8 py-2 bg-slate-100 dark:bg-slate-800 border-none rounded-xl text-xs outline-none focus:ring-2 focus:ring-indigo-500 text-slate-800 dark:text-slate-100 placeholder:text-slate-400"
-              />
-              <button
-                v-if="creatorSearch"
-                @click="creatorSearch = ''"
-                class="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-full"
-              >
-                <X class="w-3.5 h-3.5" />
-              </button>
-            </div>
-
-            <!-- Sort By Select -->
-            <div class="flex items-center gap-2 shrink-0">
-              <div class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs text-slate-600 dark:text-slate-300">
-                <ArrowUpDown class="w-3.5 h-3.5 text-slate-400" />
-                <span class="text-[11px] text-slate-400 font-medium">排序</span>
-                <select
-                  v-model="creatorSortBy"
-                  class="bg-transparent border-none text-xs font-medium text-slate-700 dark:text-slate-200 focus:outline-none cursor-pointer"
-                >
-                  <option value="updated">最近活跃</option>
-                  <option value="posts">作品数</option>
-                  <option value="channels">账号数</option>
-                  <option value="name">按名称</option>
-                </select>
-              </div>
-            </div>
-          </div>
-
-          <!-- Platform Filter Pills -->
-          <div class="flex flex-wrap items-center gap-1.5 pt-2 border-t border-slate-100 dark:border-slate-800 text-xs">
-            <span class="text-[11px] text-slate-400 font-medium mr-1 flex items-center gap-1">
-              <Filter class="w-3 h-3" />
-              平台筛选:
-            </span>
-            <button
-              @click="creatorPlatformFilter = 'all'"
-              class="px-2.5 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer"
-              :class="creatorPlatformFilter === 'all'
-                ? 'bg-indigo-600 text-white shadow-2xs font-semibold'
-                : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:hover:bg-slate-700'"
-            >
-              全部 ({{ creators.length }})
-            </button>
-            <template v-for="(cfg, pKey) in PLATFORM_REGISTRY" :key="pKey">
-              <button
-                v-if="creatorCountByPlatform[pKey]"
-                @click="creatorPlatformFilter = pKey"
-                class="px-2.5 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer flex items-center gap-1"
-                :class="creatorPlatformFilter === pKey
-                  ? 'bg-indigo-600 text-white shadow-2xs font-semibold'
-                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:hover:bg-slate-700'"
-              >
-                <span>{{ cfg.name }}</span>
-                <span class="text-[10px] opacity-75">({{ creatorCountByPlatform[pKey] || 0 }})</span>
-              </button>
-            </template>
-          </div>
-
-          <!-- Tags Filter Row (Tri-state: Include / Exclude / Neutral) -->
-          <div v-if="allTags.length > 0" class="flex flex-wrap items-center gap-1.5 pt-2 border-t border-slate-100 dark:border-slate-800 text-xs">
-            <span class="text-[11px] text-slate-400 font-medium mr-1 flex items-center gap-1">
-              <Tag class="w-3 h-3" />
-              标签筛选:
-            </span>
-            <button
-              type="button"
-              @click="clearAllTagFilters"
-              :class="includeTags.size === 0 && excludeTags.size === 0 ? 'bg-indigo-600 text-white font-semibold shadow-2xs' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'"
-              class="px-2.5 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer"
-            >
-              全部标签
-            </button>
-            <button
-              v-for="t in allTags"
-              :key="'dir-tag-' + t"
-              type="button"
-              @click="cycleTagFilter(t)"
-              :class="[
-                getTagFilterState(t) === 'include'
-                  ? 'bg-indigo-600 text-white font-bold shadow-2xs'
-                  : getTagFilterState(t) === 'exclude'
-                  ? 'bg-rose-600 text-white font-bold shadow-2xs line-through'
-                  : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700'
-              ]"
-              class="px-2.5 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer flex items-center gap-1"
-              :title="getTagFilterState(t) === 'include' ? '正向包含（点击切为反向排除）' : getTagFilterState(t) === 'exclude' ? '反向排除（点击取消）' : '点击设置为正向包含(+)'"
-            >
-              <span v-if="getTagFilterState(t) === 'include'" class="text-[10px] font-black">+</span>
-              <span v-else-if="getTagFilterState(t) === 'exclude'" class="text-[10px] font-black">−</span>
-              <span>#{{ t }}</span>
-            </button>
-          </div>
-        </div>
-
-        <!-- Batch Action Toolbar (When Batch Mode Active) -->
-        <div
-          v-if="isBatchMode"
-          class="flex flex-wrap items-center justify-between gap-3 p-3.5 bg-indigo-50/90 dark:bg-indigo-950/50 border border-indigo-200 dark:border-indigo-800/70 rounded-2xl animate-fade-in"
-        >
-          <div class="flex items-center gap-3">
-            <button
-              @click="selectAllFilteredCreators"
-              class="flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-slate-900 border border-indigo-200 dark:border-indigo-800 rounded-lg text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-indigo-50 cursor-pointer"
-            >
-              <CheckSquare class="w-3.5 h-3.5 text-indigo-600" />
-              <span>全选 ({{ filteredCreatorsList.length }})</span>
-            </button>
-            <button
-              @click="clearCreatorSelection"
-              class="text-xs text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 underline cursor-pointer"
-            >
-              清空选择
-            </button>
-            <span class="text-xs font-semibold text-indigo-700 dark:text-indigo-300">
-              已选 {{ selectedCreatorIds.size }} 位
-            </span>
-          </div>
-
-          <div class="flex items-center gap-2">
-            <button
-              @click="batchRefreshSelectedCreators"
-              :disabled="selectedCreatorIds.size === 0"
-              class="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg text-xs font-semibold disabled:opacity-40 transition-colors cursor-pointer shadow-2xs"
-            >
-              <RefreshCw class="w-3.5 h-3.5" />
-              <span>同步选中</span>
-            </button>
-            <button
-              @click="batchDeleteSelectedCreators"
-              :disabled="selectedCreatorIds.size === 0"
-              class="flex items-center gap-1.5 px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-semibold disabled:opacity-40 transition-colors cursor-pointer shadow-2xs"
-            >
-              <Trash2 class="w-3.5 h-3.5" />
-              <span>删除选中</span>
-            </button>
-          </div>
-        </div>
-
-        <!-- Empty Creators State -->
-        <div v-if="creators.length === 0" class="text-center py-16 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800">
-          <Users class="w-10 h-10 text-slate-400 mx-auto mb-3" />
-          <p class="text-xs text-slate-500 mb-4">还没有关注任何创作者</p>
-          <button
-            @click="loadDemoData"
-            class="px-4 py-2 text-xs font-semibold bg-indigo-50 hover:bg-indigo-100 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-300 rounded-xl cursor-pointer"
-          >
-            导入演示数据
-          </button>
-        </div>
-
-        <!-- Empty Filter Results -->
-        <div v-else-if="filteredCreatorsList.length === 0" class="text-center py-16 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800">
-          <Search class="w-8 h-8 text-slate-400 mx-auto mb-2" />
-          <p class="text-xs text-slate-500 mb-3">未找到匹配的创作者</p>
-          <button
-            @click="creatorSearch = ''; creatorPlatformFilter = 'all'; creatorTagFilter = 'all'; clearAllTagFilters();"
-            class="px-3 py-1.5 text-xs font-medium text-indigo-600 bg-indigo-50 dark:bg-indigo-950/50 rounded-lg hover:underline cursor-pointer"
-          >
-            清除筛选
-          </button>
-        </div>
-
-        <!-- Creator Cards Grid -->
-        <div v-else class="columns-1 md:columns-2 gap-4 xl:gap-5">
-          <div
-            v-for="c in filteredCreatorsList"
-            :key="c.id"
-            class="mb-4 xl:mb-5 break-inside-avoid p-3.5 bg-white dark:bg-slate-900 rounded-2xl border transition-all duration-200 shadow-sm space-y-3 relative overflow-hidden"
-            :class="selectedCreatorIds.has(c.id) ? 'border-indigo-500 ring-2 ring-indigo-500/20 bg-indigo-50/20 dark:bg-indigo-950/20' : 'border-slate-200/80 dark:border-slate-800 hover:border-indigo-300 dark:hover:border-indigo-700 hover:shadow-md'"
-          >
-            <!-- Top Row: Avatar, Name, Stats & Actions -->
-            <div class="flex items-start justify-between gap-3">
-              <div class="flex items-center gap-3 min-w-0">
-                <!-- Checkbox in Batch Mode -->
-                <button
-                  v-if="isBatchMode"
-                  @click="toggleSelectCreator(c.id)"
-                  class="shrink-0 text-indigo-600 hover:scale-105 transition-transform cursor-pointer"
-                >
-                  <CheckSquare v-if="selectedCreatorIds.has(c.id)" class="w-5 h-5 text-indigo-600" />
-                  <Square v-else class="w-5 h-5 text-slate-400" />
-                </button>
-
-                <!-- Avatar with Hover Change Overlay -->
-                <div
-                  class="relative group/avatar w-11 h-11 rounded-xl bg-gradient-to-br from-indigo-50 to-violet-100 dark:from-indigo-950/70 dark:to-violet-900/50 flex items-center justify-center text-indigo-600 font-black text-lg overflow-hidden border border-indigo-100 dark:border-indigo-900 shrink-0 shadow-inner cursor-pointer"
-                  @click.stop="openAvatarPicker(c)"
-                  title="更换主头像"
-                >
-                  <img
-                    v-if="getCreatorAvatar(c)"
-                    :src="getCreatorAvatar(c)"
-                    referrerpolicy="no-referrer"
-                    @error="handleAvatarError(getCreatorAvatar(c))"
-                    class="w-full h-full object-cover transition-transform duration-200 group-hover/avatar:scale-105"
-                  />
-                  <span v-else>{{ c.name.slice(0, 1) }}</span>
-
-                  <!-- Subtle hover mask & camera icon -->
-                  <div class="absolute inset-0 bg-black/40 opacity-0 group-hover/avatar:opacity-100 transition-opacity flex items-center justify-center text-white">
-                    <Camera class="w-4 h-4 drop-shadow" />
-                  </div>
-                </div>
-
-                <!-- Name & Meta Tags -->
-                <div class="min-w-0">
-                  <div class="flex items-center gap-2">
-                    <h3 class="font-bold text-base text-slate-900 dark:text-white truncate">{{ c.name }}</h3>
-                    <span class="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 shrink-0">
-                      {{ creatorPostCountMap[c.id] || 0 }} 条作品
-                    </span>
-                  </div>
-                  <div class="flex flex-wrap items-center gap-1 mt-1">
-                    <span
-                      v-for="t in c.tags"
-                      :key="t"
-                      class="px-2 py-0.5 rounded-full text-[10px] font-medium bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300 cursor-pointer hover:bg-indigo-50 hover:text-indigo-600 transition-colors"
-                      @click="cycleTagFilter(t)"
-                      :title="'点击过滤标签 #' + t"
-                    >
-                      #{{ t }}
-                    </span>
-                    <span v-if="!c.tags?.length" class="text-[10px] text-slate-400">未分类</span>
-                    <!-- Edit tags button -->
-                    <button
-                      type="button"
-                      @click.stop="openEditCreatorTags(c)"
-                      title="编辑修改创作者标签"
-                      class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] text-indigo-600 dark:text-indigo-400 hover:bg-indigo-50 dark:hover:bg-indigo-950/60 cursor-pointer transition-colors"
-                    >
-                      <Edit3 class="w-3 h-3" />
-                      <span>编辑标签</span>
-                    </button>
-                  </div>
-                </div>
-              </div>
-
-              <!-- Top Quick Action Buttons -->
-              <div class="flex items-center gap-1 shrink-0">
-                <!-- Open Deep History Sync Modal Button -->
-                <button
-                  @click="openDeepSyncModal(c)"
-                  title="回溯更早的历史动态"
-                  class="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:hover:bg-indigo-900/60 text-indigo-600 dark:text-indigo-400 text-xs font-semibold transition-colors cursor-pointer border border-indigo-200/60 dark:border-indigo-800/60 shadow-2xs"
-                >
-                  <History class="w-3.5 h-3.5" />
-                  <span class="hidden sm:inline">回溯历史</span>
-                </button>
-                <!-- Quick Sync Latest -->
-                <button
-                  @click="handleRefreshCreator(c.id)"
-                  title="同步最新动态"
-                  class="p-2 text-slate-600 hover:text-indigo-600 hover:bg-slate-100 dark:text-slate-400 dark:hover:text-indigo-400 dark:hover:bg-slate-800 rounded-xl transition-colors cursor-pointer"
-                >
-                  <RefreshCw class="w-4 h-4" />
-                </button>
-                <!-- Delete Creator Archive -->
-                <button
-                  @click="deleteCreator(c.id)"
-                  title="移除该创作者档案"
-                  class="p-2 text-rose-500 hover:bg-rose-50 dark:hover:bg-rose-950/60 rounded-xl transition-colors cursor-pointer"
-                >
-                  <Trash2 class="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-
-            <!-- Attached Channels Grouped by Platform -->
-            <div class="space-y-2.5 pt-2 border-t border-slate-100 dark:border-slate-800">
-              <div class="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400 pb-1">
-                <span class="font-semibold text-slate-700 dark:text-slate-300">已绑定账号</span>
-                <button @click="openAddModal('channel', c)" class="text-indigo-600 hover:text-indigo-700 dark:text-indigo-400 font-semibold flex items-center gap-1 cursor-pointer bg-indigo-50 dark:bg-indigo-950/60 px-2 py-1 rounded-lg border border-indigo-100 dark:border-indigo-900 transition-colors">
-                  <Plus class="w-3 h-3" />
-                  <span>+ 绑定新账号</span>
-                </button>
-              </div>
-
-              <!-- Grouped Platform Sections -->
-              <div class="space-y-2">
-                <div
-                  v-for="(chs, platform) in getCreatorGroupedChannels(c.id)"
-                  :key="platform"
-                  class="rounded-xl border border-slate-200/70 dark:border-slate-800/80 bg-slate-50/70 dark:bg-slate-850/50 p-2.5 space-y-1.5"
-                >
-                  <!-- Platform Header within Creator -->
-                  <div class="flex items-center justify-between">
-                    <div class="flex items-center gap-1.5">
-                      <span :class="PLATFORM_REGISTRY[platform as Platform]?.badgeBg || 'bg-slate-100 text-slate-700 border-slate-200 dark:bg-slate-800 dark:text-slate-300 dark:border-slate-700'" class="px-2 py-0.5 rounded text-[10px] font-bold border">
-                        {{ PLATFORM_REGISTRY[platform as Platform]?.name || platform }}
-                      </span>
-                      <span class="text-[11px] text-slate-400">
-                        {{ chs.length > 1 ? `绑定了 ${chs.length} 个账号 (同平台多账号互通)` : '1 个账号' }}
-                      </span>
-                    </div>
-                  </div>
-
-                  <!-- Account Rows within this Platform -->
-                  <div class="space-y-1">
-                    <div
-                      v-for="ch in chs"
-                      :key="ch.id"
-                      class="flex items-center justify-between p-1.5 rounded-lg bg-white dark:bg-slate-800 border border-slate-200/60 dark:border-slate-700/60 text-xs shadow-2xs"
-                    >
-                      <div class="flex items-center gap-2 min-w-0 flex-1">
-                        <!-- Account Role Badge with Quick Cycle Switch on Click -->
-                        <button
-                          @click="cycleChannelRole(ch)"
-                          title="点击切换账号角色分类 (主号 / 小号 / 里号 / 自定义)"
-                          class="px-1.5 py-0.5 rounded text-[10px] font-medium border transition-colors cursor-pointer shrink-0"
-                          :class="getRoleBadgeClass(ch.accountRole)"
-                        >
-                          {{ ch.label || getRoleLabel(ch.accountRole) }}
-                        </button>
-
-                        <!-- Channel Avatar Thumbnail -->
-                        <div class="w-5 h-5 rounded-full overflow-hidden shrink-0 border border-slate-200 dark:border-slate-700 bg-slate-100 dark:bg-slate-800 flex items-center justify-center text-[10px] text-slate-500">
-                          <img
-                            v-if="ch.avatarUrl && !failedAvatarUrls.has(ch.avatarUrl)"
-                            :src="toSecureMediaUrl(ch.avatarUrl)"
-                            referrerpolicy="no-referrer"
-                            class="w-full h-full object-cover"
-                            @error="handleAvatarError(ch.avatarUrl)"
-                          />
-                          <span v-else>{{ (ch.displayName || ch.accountId || 'U').slice(0, 1) }}</span>
-                        </div>
-
-                        <!-- Account Name & Link -->
-                        <a
-                          :href="ch.profileUrl"
-                          target="_blank"
-                          class="font-medium text-slate-700 dark:text-slate-200 hover:underline flex items-center gap-1 truncate max-w-[180px] sm:max-w-xs"
-                          :title="ch.profileUrl"
-                        >
-                          <span class="truncate">{{ ch.displayName || ch.accountId }}</span>
-                          <ExternalLink class="w-2.5 h-2.5 text-slate-400 shrink-0" />
-                        </a>
-
-                        <!-- Status Indicator -->
-                        <span
-                          v-if="ch.status === 'error'"
-                          @click.stop="alert(`【${ch.displayName || ch.accountId} 同步未成功】\n\n原因：${ch.errorMessage || '未知异常'}`)"
-                          class="px-1.5 py-0.5 rounded text-[10px] font-medium bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-900/60 hover:bg-rose-100 cursor-pointer shrink-0"
-                          title="点击查看具体同步错误详情"
-                        >
-                          同步失败
-                        </span>
-                      </div>
-
-                      <!-- Actions -->
-                      <div class="flex items-center gap-1 shrink-0 ml-2">
-                        <!-- Deep Sync Single Channel -->
-                        <button
-                          @click="openDeepSyncModal(c, ch.id)"
-                          title="针对该账号深度回溯更早历史动态"
-                          class="p-1 text-slate-500 hover:text-indigo-600 dark:text-slate-400 dark:hover:text-indigo-400 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors cursor-pointer"
-                        >
-                          <History class="w-3.5 h-3.5" />
-                        </button>
-                        <!-- Refresh Channel Latest (Normal click: incremental; Shift+click: force refresh existing) -->
-                        <button
-                          @click="handleRefreshChannel(ch, false)"
-                          @click.shift.stop="handleRefreshChannel(ch, true)"
-                          title="同步最新动态 (按住 Shift 点击可强制重新刷新覆盖已有内容与图片)"
-                          class="p-1 text-slate-500 hover:text-indigo-600 dark:text-slate-400 dark:hover:text-indigo-400 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors cursor-pointer"
-                        >
-                          <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': ch.status === 'updating' }" />
-                        </button>
-                        <!-- Delete Channel -->
-                        <button
-                          @click="deleteChannel(ch.id)"
-                          title="移除该账号"
-                          class="p-1 text-slate-400 hover:text-rose-600 rounded-lg hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors cursor-pointer"
-                        >
-                          <Trash2 class="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
-
-                    <!-- Error notification if present -->
-                    <div
-                      v-for="ch in chs.filter(c => c.errorMessage)"
-                      :key="'err-' + ch.id"
-                      class="text-[10px] text-rose-600 dark:text-rose-400 bg-rose-50 dark:bg-rose-950/50 p-1.5 rounded-md border border-rose-200 dark:border-rose-900/60 flex items-start gap-1"
-                    >
-                      <AlertCircle class="w-3 h-3 shrink-0 mt-0.5 text-rose-500" />
-                      <span class="break-all">{{ ch.displayName || ch.accountId }}: {{ ch.errorMessage }}</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div v-if="channels.filter(ch => ch.creatorId === c.id).length === 0" class="text-center py-4 text-xs text-slate-400">
-                  暂无绑定账号，点击上方 + 绑定新账号
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section v-else-if="activeTab === 'bookmarks'" class="space-y-5">
-        <!-- Bookmarks Header & Filter Bar -->
-        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-          <div>
-            <div class="flex items-center gap-2">
-              <div class="w-8 h-8 rounded-xl bg-amber-50 dark:bg-amber-950/60 flex items-center justify-center text-amber-500">
-                <Bookmark class="w-4 h-4 fill-amber-500" />
-              </div>
-              <h2 class="font-bold text-lg text-slate-900 dark:text-white">收藏</h2>
-              <span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-amber-50 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300 border border-amber-200 dark:border-amber-800">
-                {{ filteredBookmarkedPosts.length }} 条收藏
-              </span>
-            </div>
-            <p class="text-xs text-slate-500 mt-1">
-              收藏的动态不会被历史清理删除，永久保留。
-            </p>
-          </div>
-        </div>
-
-        <!-- Bookmarks Search & Platform Filter Bar -->
-        <div class="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 p-4 shadow-2xs space-y-3">
-          <div class="flex flex-col md:flex-row items-stretch md:items-center gap-3">
-            <!-- Search Input -->
-            <div class="relative flex-1">
-              <Search class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-              <input
-                v-model="bookmarkSearchQuery"
-                type="text"
-                placeholder="搜索收藏..."
-                class="w-full pl-9 pr-8 py-2 bg-slate-100 dark:bg-slate-800 border-none rounded-xl text-xs outline-none focus:ring-2 focus:ring-amber-500 text-slate-800 dark:text-slate-100 placeholder:text-slate-400"
-              />
-              <button
-                v-if="bookmarkSearchQuery"
-                type="button"
-                @click="bookmarkSearchQuery = ''"
-                class="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-full"
-              >
-                <X class="w-3.5 h-3.5" />
-              </button>
-            </div>
-          </div>
-
-          <!-- Platform Filter Pills -->
-          <div class="flex flex-wrap items-center gap-1.5 pt-2 border-t border-slate-100 dark:border-slate-800 text-xs">
-            <span class="text-[11px] text-slate-400 font-medium mr-1 flex items-center gap-1">
-              <Filter class="w-3 h-3" />
-              平台筛选:
-            </span>
-            <button
-              type="button"
-              @click="bookmarkSelectedPlatform = 'all'"
-              class="px-2.5 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer"
-              :class="bookmarkSelectedPlatform === 'all'
-                ? 'bg-amber-600 text-white shadow-2xs font-semibold'
-                : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:hover:bg-slate-700'"
-            >
-              全部 ({{ posts.filter(p => p.isBookmarked).length }})
-            </button>
-            <template v-for="(cfg, pKey) in PLATFORM_REGISTRY" :key="'bm-p-' + pKey">
-              <button
-                v-if="posts.some(p => p.isBookmarked && p.platform === pKey)"
-                type="button"
-                @click="bookmarkSelectedPlatform = pKey"
-                class="px-2.5 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer flex items-center gap-1"
-                :class="bookmarkSelectedPlatform === pKey
-                  ? 'bg-amber-600 text-white shadow-2xs font-semibold'
-                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200 dark:bg-slate-800 dark:text-slate-400 dark:hover:bg-slate-700'"
-              >
-                <span>{{ cfg.name }}</span>
-                <span class="text-[10px] opacity-75">
-                  ({{ posts.filter(p => p.isBookmarked && p.platform === pKey).length }})
-                </span>
-              </button>
-            </template>
-          </div>
-        </div>
-
-        <!-- Empty Bookmarks State -->
-        <div v-if="filteredBookmarkedPosts.length === 0" class="text-center py-20 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800">
-          <div class="w-16 h-16 mx-auto mb-4 rounded-2xl bg-amber-50 dark:bg-amber-950/50 flex items-center justify-center text-amber-500">
-            <Bookmark class="w-8 h-8" />
-          </div>
-          <h3 class="text-base font-bold text-slate-800 dark:text-slate-200 mb-1">
-            {{ posts.some(p => p.isBookmarked) ? '未找到符合条件的收藏动态' : '暂无收藏的动态' }}
-          </h3>
-          <p class="text-xs text-slate-500 max-w-md mx-auto mb-5 leading-relaxed">
-            {{ posts.some(p => p.isBookmarked) ? '可以尝试更换搜索关键词或选择全部平台。' : '在动态流中点击 ☆ 收藏喜欢的内容' }}
-          </p>
-          <button
-            type="button"
-            @click="activeTab = 'feed'"
-            class="px-4 py-2 text-xs font-semibold bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl shadow-xs transition-colors cursor-pointer"
-          >
-            前往动态
-          </button>
-        </div>
-
-        <!-- Bookmarked Posts Masonry Waterfall Layout -->
-        <div v-else class="space-y-6">
-          <div class="flex gap-4 xl:gap-5 items-start">
-            <div
-              v-for="(colPosts, colIdx) in bookmarkColumns"
-              :key="'bm-col-' + colIdx"
-              class="flex-1 flex flex-col gap-4 xl:gap-5 min-w-0"
-            >
-              <PostCard
-                v-for="post in colPosts"
-                :key="'bm-' + post.id"
-                :post="post"
-                :creators="creators"
-                :channels="channels"
-                bookmarked
-                @bookmark="toggleBookmarkPost"
-                @delete="handleDeletePost"
-                @read="markPostRead"
-                @media="lightboxMedia = $event"
-                @avatar-error="handleAvatarError"
-              />
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <section v-else-if="activeTab === 'settings'" class="max-w-3xl mx-auto space-y-6">
-        <!-- Security & Architecture Guarantee Banner -->
-        <div class="p-5 bg-gradient-to-r from-indigo-900/10 to-violet-900/10 dark:from-indigo-950/50 dark:to-violet-950/50 border border-indigo-200 dark:border-indigo-800/60 rounded-2xl flex items-start gap-3">
-          <ShieldCheck class="w-6 h-6 text-indigo-600 dark:text-indigo-400 shrink-0 mt-0.5" />
-          <div class="text-xs space-y-1">
-            <h4 class="font-bold text-slate-900 dark:text-white text-sm">隐私与安全</h4>
-            <p class="text-slate-600 dark:text-slate-300 leading-relaxed">
-              所有数据仅存储在本地浏览器中，不会上传任何信息到外部服务器。
-            </p>
-          </div>
-        </div>
-
-        <!-- Platform Service Hub & Adapter Matrix -->
-        <div class="p-6 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-5">
-          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div>
-              <h3 class="font-bold text-base text-slate-900 dark:text-white flex items-center gap-2">
-                <span>平台与登录状态</span>
-              </h3>
-              <p class="text-xs text-slate-500 mt-0.5">
-                查看各平台的登录状态和连接情况
-              </p>
-            </div>
-            <div class="flex items-center gap-2 shrink-0">
-              <button
-                @click="openAddModal('new', undefined, 'https://')"
-                class="px-3 py-1.5 text-xs font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 rounded-lg border border-indigo-200 dark:border-indigo-800 flex items-center gap-1 cursor-pointer transition-colors"
-              >
-                <Plus class="w-3.5 h-3.5" />
-                <span>+ 添加 RSS 源</span>
-              </button>
-              <button
-                @click="checkPlatformLogins"
-                class="px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 rounded-lg hover:bg-slate-200 cursor-pointer flex items-center gap-1.5 transition-colors"
-              >
-                <RefreshCw class="w-3.5 h-3.5" />
-                <span>检测登录状态</span>
-              </button>
-            </div>
-          </div>
-
-          <!-- Architecture & auth guide -->
-          <div class="p-3.5 bg-slate-50 dark:bg-slate-800/40 rounded-xl border border-slate-200/60 dark:border-slate-800 text-[11px] text-slate-600 dark:text-slate-300 space-y-1.5">
-            <div class="font-semibold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
-              <Sparkles class="w-3.5 h-3.5 text-indigo-500 shrink-0" />
-              <span>登录说明：</span>
-            </div>
-            <p>• <b>大多数平台</b>（B站、Pixiv、Fantia、Withny 等）自动使用浏览器登录状态，在主站登录即可生效。</p>
-            <p>• <b>单页应用 (SPA)</b>：Rplay 等站点可在卡片中点击“从当前页同步”。</p>
-            <p>• <b>抗限流同源抓取</b>：X (Twitter) 结合浏览器活跃标签页与同源请求，保障同步稳定性。</p>
-            <p>• <b>通用订阅协议</b>：支持标准 RSS 2.0 / Atom 1.0 与 RSSHub 源，订阅博客、Substack 等外部内容。</p>
-          </div>
-
-          <!-- Platform Grid with Per-Platform Contextual Actions -->
-          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3.5">
-            <div
-              v-for="(meta, key) in PLATFORM_REGISTRY"
-              :key="key"
-              class="p-4 bg-slate-50/80 dark:bg-slate-850/60 border border-slate-200/80 dark:border-slate-800 rounded-xl flex flex-col justify-between gap-3 shadow-2xs"
-            >
-              <div>
-                <div class="flex items-start justify-between gap-2 mb-1.5">
-                  <div class="flex items-center gap-2">
-                    <span class="font-bold text-xs text-slate-900 dark:text-white">{{ meta.name }}</span>
-                    <span class="px-1.5 py-0.2 rounded text-[9px] font-medium bg-slate-200/80 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
-                      {{ meta.authTypeName }}
-                    </span>
-                  </div>
-                  <span
-                    class="w-2.5 h-2.5 rounded-full shrink-0 mt-0.5"
-                    :class="platformLoginStatus[key] ? 'bg-emerald-500 shadow-xs shadow-emerald-500/50' : 'bg-amber-400'"
-                    :title="platformLoginStatus[key] ? '就绪 (可同步)' : '未检测到会话'"
-                  ></span>
-                </div>
-                <p class="text-[11px] text-slate-500 dark:text-slate-400 line-clamp-2 leading-relaxed">
-                  {{ meta.description }}
-                </p>
-              </div>
-
-              <!-- Contextual Action per Platform -->
-              <div class="pt-2 border-t border-slate-200/50 dark:border-slate-800/80">
-                <!-- Rplay specific action -->
-                <div v-if="key === 'rplay'" class="space-y-2">
-                  <div class="flex items-center justify-between text-[11px] px-0.5">
-                    <span class="text-slate-500 dark:text-slate-400">登录状态:</span>
-                    <span
-                      class="font-mono text-[10px] px-2 py-0.5 rounded-full font-medium"
-                      :class="platformLoginStatus['rplay'] ? 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'"
-                    >
-                      {{ platformLoginStatus['rplay'] ? (currentRplayToken ? currentRplayToken.slice(0, 10) + '...' : '已配置') : '未配置' }}
-                    </span>
-                  </div>
-                  <div class="flex gap-1.5">
-                    <button
-                      @click="syncRplayFromTab"
-                      class="flex-1 py-1.5 px-2 text-xs font-medium text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 rounded-lg border border-indigo-200 dark:border-indigo-800 flex items-center justify-center gap-1 cursor-pointer transition-colors"
-                      title="在浏览器中打开 rplay.live 后点击一键同步"
-                    >
-                      <Link class="w-3.5 h-3.5" />
-                      <span>从当前页同步</span>
-                    </button>
-                    <button
-                      @click="promptManualRplayToken"
-                      class="py-1.5 px-2.5 text-xs font-medium text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg flex items-center justify-center gap-1 cursor-pointer transition-colors"
-                      title="手动输入、粘贴或修改 Rplay Token"
-                    >
-                      <Key class="w-3.5 h-3.5 text-slate-500" />
-                      <span>手动输入</span>
-                    </button>
-                  </div>
-                </div>
-
-                <!-- Twitter specific action -->
-                <button
-                  v-else-if="key === 'twitter'"
-                  @click="checkPlatformLogins"
-                  class="w-full py-1.5 px-2 text-xs font-medium text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 rounded-lg flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
-                >
-                  <RefreshCw class="w-3.5 h-3.5" />
-                  <span>检测 X/Twitter 登录</span>
-                </button>
-
-                <!-- RSS specific action -->
-                <button
-                  v-else-if="key === 'rss'"
-                  @click="openAddModal('new', undefined, 'https://')"
-                  class="w-full py-1.5 px-2 text-xs font-medium text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 rounded-lg border border-indigo-200 dark:border-indigo-800 flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
-                >
-                  <Plus class="w-3.5 h-3.5" />
-                  <span>添加 RSS 订阅</span>
-                </button>
-
-                <!-- Cookie based or open platforms -->
-                <a
-                  v-else
-                  :href="`https://${meta.domain}`"
-                  target="_blank"
-                  class="w-full py-1.5 px-2 text-xs font-medium text-slate-600 dark:text-slate-400 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 rounded-lg flex items-center justify-center gap-1.5 transition-colors"
-                >
-                  <span>打开登录页 ↗</span>
-                </a>
-              </div>
-            </div>
-
-            <!-- Custom Feed Expansion Slot -->
-            <div
-              @click="openAddModal('new', undefined, 'https://')"
-              class="p-4 rounded-xl border-2 border-dashed border-slate-200 dark:border-slate-800 hover:border-indigo-400 dark:hover:border-indigo-600 flex flex-col items-center justify-center text-center cursor-pointer transition-all group bg-slate-50/40 dark:bg-slate-850/40"
-            >
-              <div class="w-8 h-8 rounded-full bg-indigo-50 dark:bg-indigo-950/60 flex items-center justify-center text-indigo-600 mb-1.5 group-hover:scale-110 transition-transform">
-                <Plus class="w-4 h-4" />
-              </div>
-              <span class="font-bold text-xs text-slate-800 dark:text-slate-200">添加自定义 RSS / 独立源</span>
-              <span class="text-[10px] text-slate-400 mt-0.5">支持博客、Substack 或 RSSHub</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- Data Backup & Restore -->
-        <div class="p-6 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
-          <div>
-            <h3 class="font-bold text-base text-slate-900 dark:text-white">数据备份与导出</h3>
-            <p class="text-xs text-slate-500 mt-0.5">创作者档案与动态均安全保存在浏览器本地，支持随时导出与恢复独立备份。</p>
-          </div>
-
-          <div class="flex flex-wrap gap-3">
-            <button
-              @click="exportBackupToFile"
-              class="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-xs transition-colors cursor-pointer"
-            >
-              <FolderDown class="w-4 h-4" />
-              <span>导出到文件</span>
-            </button>
-
-            <button
-              @click="exportBackup"
-              class="flex items-center gap-2 px-4 py-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-xl text-xs font-semibold transition-colors cursor-pointer"
-            >
-              <Download class="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
-              <span>下载 JSON 备份</span>
-            </button>
-
-            <label class="flex items-center gap-2 px-4 py-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-xl text-xs font-semibold transition-colors cursor-pointer">
-              <Upload class="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
-              <span>导入备份</span>
-              <input type="file" accept=".json" class="hidden" @change="handleImportFile" />
-            </label>
-
-            <button
-              @click="loadDemoData"
-              class="flex items-center gap-2 px-4 py-2.5 bg-indigo-50 dark:bg-indigo-950/50 hover:bg-indigo-100 text-indigo-600 dark:text-indigo-300 rounded-xl text-xs font-semibold transition-colors cursor-pointer"
-            >
-              <Sparkles class="w-4 h-4" />
-              <span>导入演示数据</span>
-            </button>
-          </div>
-        </div>
-
-        <!-- Fetch Preferences -->
-        <div class="p-6 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
-          <h3 class="font-bold text-base text-slate-900 dark:text-white">同步设置</h3>
-          <div class="space-y-3">
-            <div class="flex items-center justify-between py-2 border-b border-slate-100 dark:border-slate-800 text-xs">
-              <div>
-                <div class="font-semibold text-slate-800 dark:text-slate-200">每次获取条数</div>
-                <div class="text-[11px] text-slate-400">每次同步时获取的动态条数</div>
-              </div>
-              <select
-                v-model.number="settings.itemsPerFetch"
-                @change="saveSettings({ itemsPerFetch: settings.itemsPerFetch })"
-                class="px-3 py-1.5 bg-slate-100 dark:bg-slate-800 rounded-lg text-xs outline-none cursor-pointer"
-              >
-                <option :value="5">5 条</option>
-                <option :value="10">10 条（推荐）</option>
-                <option :value="20">20 条</option>
-              </select>
-            </div>
-
-            <div class="flex items-center justify-between py-2 border-b border-slate-100 dark:border-slate-800 text-xs">
-              <div>
-                <div class="font-semibold text-slate-800 dark:text-slate-200">请求间隔</div>
-                <div class="text-[11px] text-slate-400">连续同步多个账号时的请求间隔，避免触发平台限制</div>
-              </div>
-              <select
-                v-model.number="settings.requestDelayMs"
-                @change="saveSettings({ requestDelayMs: settings.requestDelayMs })"
-                class="px-3 py-1.5 bg-slate-100 dark:bg-slate-800 rounded-lg text-xs outline-none cursor-pointer"
-              >
-                <option :value="300">300ms（快）</option>
-                <option :value="600">600ms（推荐）</option>
-                <option :value="1200">1200ms（保守）</option>
-              </select>
-            </div>
-
-            <div class="flex items-center justify-between py-2 border-b border-slate-100 dark:border-slate-800 text-xs">
-              <div>
-                <div class="font-semibold text-slate-800 dark:text-slate-200">后台自动更新</div>
-                <div class="text-[11px] text-slate-400">关闭后仅在手动点击“同步全部”时拉取，冷启动与后台绝不发起任何抓取请求</div>
-              </div>
-              <label class="relative inline-flex items-center cursor-pointer">
-                <input
-                  type="checkbox"
-                  v-model="settings.enableAutoSync"
-                  @change="saveSettings({ enableAutoSync: settings.enableAutoSync }); chrome.runtime?.sendMessage?.({ type: 'UPDATE_AUTO_SYNC' });"
-                  class="sr-only peer"
-                />
-                <div class="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer dark:bg-slate-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
-              </label>
-            </div>
-
-            <div class="flex items-center justify-between py-2 text-xs">
-              <div>
-                <div class="font-semibold text-slate-800 dark:text-slate-200">默认隐藏转发</div>
-                <div class="text-[11px] text-slate-400">默认隐藏转发/转推内容，可在动态页随时切换</div>
-              </div>
-              <label class="relative inline-flex items-center cursor-pointer">
-                <input
-                  type="checkbox"
-                  v-model="settings.hideReposts"
-                  @change="saveSettings({ hideReposts: settings.hideReposts }); hideReposts = Boolean(settings.hideReposts);"
-                  class="sr-only peer"
-                />
-                <div class="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer dark:bg-slate-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
-              </label>
-            </div>
-          </div>
-        </div>
-
-        <!-- Local Disk Image Cache (File System Access API) -->
-        <ImageCacheSettings
-          :settings="settings"
-          :posts="posts"
-          :creators="creators"
-          @updateSettings="saveSettings($event)"
-        />
-
-        <!-- Database Health & Cache Cleanup -->
-        <div class="p-6 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
-          <div class="flex items-center justify-between">
-            <div>
-              <h3 class="font-bold text-base text-slate-900 dark:text-white flex items-center gap-2">
-                <span>存储管理</span>
-                <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800">
-                  运行良好
-                </span>
-              </h3>
-              <p class="text-[11px] text-slate-400 mt-0.5">数据存储在本地浏览器中，可手动清理历史数据释放空间</p>
-            </div>
-            <button
-              type="button"
-              @click="reloadData"
-              class="px-2.5 py-1 text-xs bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg text-slate-600 dark:text-slate-300 transition-colors cursor-pointer"
-            >
-              刷新
-            </button>
-          </div>
-
-          <!-- Metrics Grid -->
-          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
-            <div class="p-3 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-100 dark:border-slate-700/60">
-              <div class="text-[10px] text-slate-400 font-medium">动态总数</div>
-              <div class="text-base font-bold text-slate-900 dark:text-white mt-0.5">{{ dbStats.totalPostsCount }} 条</div>
-            </div>
-            <div class="p-3 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-100 dark:border-slate-700/60">
-              <div class="text-[10px] text-slate-400 font-medium">收藏数</div>
-              <div class="text-base font-bold text-amber-600 dark:text-amber-400 mt-0.5">{{ dbStats.bookmarkedPostsCount }} 条</div>
-            </div>
-            <div class="p-3 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-100 dark:border-slate-700/60">
-              <div class="text-[10px] text-slate-400 font-medium">存储占用</div>
-              <div class="text-base font-bold text-indigo-600 dark:text-indigo-400 mt-0.5">{{ formatBytes(dbStats.storageUsageBytes) }}</div>
-            </div>
-            <div class="p-3 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-100 dark:border-slate-700/60">
-              <div class="text-[10px] text-slate-400 font-medium">创作者 / 账号</div>
-              <div class="text-base font-bold text-slate-900 dark:text-white mt-0.5">{{ dbStats.creatorsCount }} 位 / {{ dbStats.channelsCount }} 个</div>
-            </div>
-          </div>
-
-          <!-- Actions -->
-          <div class="pt-2 border-t border-slate-100 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3 text-xs">
-            <div class="text-slate-400 text-[11px] leading-relaxed max-w-md">
-              收藏的动态不会被清理，永久保留。
-            </div>
-            <div class="flex items-center gap-2">
-              <button
-                type="button"
-                @click="handleHealBrokenMedia"
-                :disabled="isHealingMedia"
-                class="px-3 py-1.5 bg-indigo-50 dark:bg-indigo-950/50 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800/60 rounded-xl font-medium transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
-                title="自动扫描并纠正本地数据库中小红书受限 CDN 域名，恢复旧笔记正常显示"
-              >
-                <Sparkles class="w-3.5 h-3.5" :class="{ 'animate-spin': isHealingMedia }" />
-                <span>{{ isHealingMedia ? '修复中...' : '一键修复小红书图裂' }}</span>
-              </button>
-              <button
-                type="button"
-                @click="handleCleanupPosts(60)"
-                :disabled="isCleaningStorage"
-                class="px-3 py-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-xl font-medium transition-colors cursor-pointer disabled:opacity-50"
-              >
-                清理 60 天前数据
-              </button>
-              <button
-                type="button"
-                @click="handleCleanupPosts(30)"
-                :disabled="isCleaningStorage"
-                class="px-3 py-1.5 bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800/60 rounded-xl font-medium transition-colors cursor-pointer disabled:opacity-50"
-              >
-                清理 30 天前数据
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <!-- Dynamic Recycle Bin Card (In Settings) -->
-        <div id="recycle-bin-section" class="p-6 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
-          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div>
-              <h3 class="font-bold text-base text-slate-900 dark:text-white flex items-center gap-2">
-                <Trash2 class="w-4 h-4 text-rose-500" />
-                <span>动态回收站 (安全兜底与定向找回)</span>
-                <span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-800/60">
-                  {{ deletedPostCount }} 条记录
-                </span>
-              </h3>
-              <p class="text-xs text-slate-500 mt-1">
-                所有手动删除的动态均在此安全兜底。日常“一键同步”默认不拉取回收站中的内容；您可在此随时“定向找回”并即刻无缝还原至动态流，避免误删导致无法恢复。
-              </p>
-            </div>
-            <div class="flex items-center gap-2 shrink-0">
-              <button
-                type="button"
-                v-if="deletedPostCount > 0"
-                @click="handleRestoreAllAndSync"
-                class="px-3.5 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl shadow-xs transition-colors cursor-pointer flex items-center gap-1.5"
-                title="将回收站中的所有动态定向还原到动态列表"
-              >
-                <RotateCcw class="w-3.5 h-3.5" />
-                <span>全部找回并还原</span>
-              </button>
-              <button
-                type="button"
-                v-if="deletedPostCount > 0"
-                @click="handleEmptyRecycleBin"
-                class="px-3.5 py-1.5 text-xs font-semibold text-slate-500 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-xl border border-slate-200 dark:border-slate-700 transition-colors cursor-pointer flex items-center gap-1"
-                title="彻底清空回收站"
-              >
-                <span>清空回收站</span>
-              </button>
-            </div>
-          </div>
-
-          <!-- Filter & Search (if records exist) -->
-          <div v-if="deletedPostsList.length > 0" class="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-            <div class="relative flex-1">
-              <Search class="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-              <input
-                v-model="deletedPostsSearchQuery"
-                type="text"
-                placeholder="搜索已删除动态关键词、标题或 ID..."
-                class="w-full pl-8.5 pr-3 py-1.5 text-xs bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 text-slate-900 dark:text-white placeholder-slate-400"
-              />
-            </div>
-          </div>
-
-          <!-- Recycle Bin Items List -->
-          <div class="space-y-2.5 max-h-96 overflow-y-auto pr-1">
-            <div
-              v-if="filteredDeletedPostsList.length === 0"
-              class="py-8 text-center bg-slate-50/50 dark:bg-slate-850/40 rounded-xl border border-dashed border-slate-200 dark:border-slate-800 text-xs text-slate-400"
-            >
-              <Trash2 class="w-6 h-6 mx-auto mb-2 text-slate-300 dark:text-slate-600" />
-              <span>{{ deletedPostsSearchQuery ? '未找到符合搜索条件的回收站记录' : '回收站为空，暂无已删除动态' }}</span>
-            </div>
-
-            <div
-              v-for="record in filteredDeletedPostsList"
-              :key="record.id"
-              class="p-3.5 bg-slate-50/80 dark:bg-slate-850/60 rounded-xl border border-slate-200/80 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs transition-all hover:border-slate-300 dark:hover:border-slate-700"
-            >
-              <div class="flex items-start gap-3 min-w-0 flex-1">
-                <!-- Media cover / thumbnail if available -->
-                <div
-                  v-if="record.postData?.mediaList?.length"
-                  class="w-13 h-13 rounded-lg overflow-hidden bg-slate-200 dark:bg-slate-800 shrink-0 border border-slate-200 dark:border-slate-700"
-                >
-                  <img
-                    :src="toSecureMediaUrl(record.postData.mediaList[0].previewUrl)"
-                    referrerpolicy="no-referrer"
-                    class="w-full h-full object-cover"
-                  />
-                </div>
-
-                <div class="min-w-0 space-y-1 flex-1">
-                  <div class="flex items-center gap-2 flex-wrap">
-                    <span
-                      v-if="record.platform || record.postData?.platform"
-                      :class="PLATFORM_REGISTRY[record.platform || record.postData?.platform || '']?.badgeBg"
-                      class="px-1.5 py-0.2 rounded text-[9px] font-bold border shrink-0"
-                    >
-                      {{ PLATFORM_REGISTRY[record.platform || record.postData?.platform || '']?.name || record.platform }}
-                    </span>
-                    <h4 class="font-bold text-slate-900 dark:text-white truncate max-w-md">
-                      {{ record.title || record.postData?.title || '未命名动态' }}
-                    </h4>
-                  </div>
-
-                  <p v-if="record.postData?.content" class="text-xs text-slate-500 dark:text-slate-400 line-clamp-1">
-                    {{ record.postData.content }}
-                  </p>
-
-                  <div class="flex items-center gap-2 text-[10px] text-slate-400 flex-wrap">
-                    <span class="font-mono truncate max-w-[140px]">ID: {{ record.id }}</span>
-                    <span>•</span>
-                    <span>删除于 {{ new Date(record.deletedAt).toLocaleString('zh-CN') }}</span>
-                    <span v-if="record.postData?.publishedAt">• 发布于 {{ new Date(record.postData.publishedAt).toLocaleDateString('zh-CN') }}</span>
-                  </div>
-                </div>
-              </div>
-
-              <!-- Action buttons on each item -->
-              <div class="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
-                <button
-                  type="button"
-                  @click="handleRestoreSingleDeleted(record)"
-                  class="px-3 py-1.5 text-xs font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 rounded-xl transition-colors cursor-pointer flex items-center gap-1"
-                  title="立即将此动态定向找回并还原到动态流"
-                >
-                  <RotateCcw class="w-3.5 h-3.5" />
-                  <span>定向找回</span>
-                </button>
-                <a
-                  v-if="record.postData?.originalUrl"
-                  :href="record.postData.originalUrl"
-                  target="_blank"
-                  class="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 rounded-lg hover:bg-slate-200/60 dark:hover:bg-slate-700/60 transition-colors"
-                  title="打开原帖"
-                >
-                  <ExternalLink class="w-3.5 h-3.5" />
-                </a>
-                <button
-                  type="button"
-                  @click="handlePermanentlyDelete(record)"
-                  class="p-1.5 text-slate-400 hover:text-rose-500 rounded-lg hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors cursor-pointer"
-                  title="彻底删除"
-                >
-                  <Trash2 class="w-3.5 h-3.5" />
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
+      <FeedView
+        v-show="activeTab === 'feed'"
+        :context="feedContext"
+        @update:searchQuery="searchQuery = $event"
+        @update:selectedPlatform="selectedPlatform = $event"
+        @update:lightboxMedia="lightboxMedia = $event"
+      />
+
+      <CreatorsView
+        v-show="activeTab === 'creators'"
+        :context="creatorsContext"
+        @add="onCreatorsAdd"
+        @avatar-picker="openAvatarPicker"
+        @deep-sync="onCreatorsDeepSync"
+        @refresh-creator="handleRefreshCreator"
+        @refresh-channel="onCreatorsRefreshChannel"
+        @delete-creator="deleteCreator"
+        @delete-channel="deleteChannel"
+        @cycle-channel-role="cycleChannelRole"
+        @batch-refresh="onCreatorsBatchRefresh"
+        @batch-delete="onCreatorsBatchDelete"
+        @demo-data="loadDemoData"
+      />
+
+      <BookmarksView
+        v-show="activeTab === 'bookmarks'"
+        :active="activeTab === 'bookmarks'"
+        :context="bookmarksContext"
+      />
+
+      <SettingsView
+        v-show="activeTab === 'settings'"
+        :active="activeTab === 'settings'"
+        :context="settingsContext"
+      />
     </main>
 
     <!-- Modal: Add Creator or Channel -->

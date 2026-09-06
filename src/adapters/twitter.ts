@@ -38,7 +38,15 @@ export const twitterAdapter: PlatformAdapter = {
       }
 
       if (res.tweetData) {
-        return this.parseGraphQLResult(
+        const parseGraphQLResult = this.parseGraphQLResult;
+        if (!parseGraphQLResult) {
+          return {
+            posts: [],
+            error: '推特解析器不可用',
+          };
+        }
+        return parseGraphQLResult.call(
+          this,
           channel,
           res.tweetData,
           res.userData,

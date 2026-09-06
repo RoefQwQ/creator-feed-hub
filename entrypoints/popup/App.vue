@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue';
-import { db } from '../../src/db';
+import { useRplaySync } from './composables/useRplaySync';
+import { db } from '../../src/infrastructure/db/database';
 import { parseProfileUrl, type ParsedProfile } from '../../src/utils/urlParser';
 import { toSecureMediaUrl } from '../../src/utils/media';
 import { bgFetch } from '../../src/utils/http';
 import { PLATFORM_REGISTRY, type Creator, type Channel } from '../../src/types';
-import { updateChannel, clearStaleUpdatingStatus } from '../../src/adapters';
+import { updateChannel, clearStaleUpdatingStatus } from '../../src/sync';
 import {
   ExternalLink,
   PlusCircle,
@@ -98,33 +99,7 @@ const activeDisplayName = computed(() => {
 const isRplayTab = computed(() => {
   return currentUrl.value.includes('rplay.live');
 });
-const rplaySyncState = ref<'idle' | 'syncing' | 'synced' | 'failed'>('idle');
-const rplaySyncMessage = ref('');
-
-async function triggerRplaySync() {
-  if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return;
-  rplaySyncState.value = 'syncing';
-  try {
-    const res = await chrome.runtime.sendMessage({ type: 'SYNC_RPLAY_TOKEN' });
-    if (res?.success) {
-      rplaySyncState.value = 'synced';
-      rplaySyncMessage.value = '已成功同步登录凭证 ✓';
-    } else {
-      // Check if already stored in local storage
-      const stored = await chrome.storage?.local?.get('rplay_auth_token');
-      if (stored?.rplay_auth_token) {
-        rplaySyncState.value = 'synced';
-        rplaySyncMessage.value = '已使用之前保存的凭证 ✓';
-      } else {
-        rplaySyncState.value = 'failed';
-        rplaySyncMessage.value = res?.error || '未在当前页面检测到有效登录 Token';
-      }
-    }
-  } catch (e: any) {
-    rplaySyncState.value = 'failed';
-    rplaySyncMessage.value = '提取失败: ' + (e?.message || e);
-  }
-}
+const { rplaySyncState, rplaySyncMessage, triggerRplaySync, markSyncedIfStored } = useRplaySync();
 
 /**
  * Executes lightweight in-page DOM script to extract author real name & avatar from current active tab
@@ -306,11 +281,7 @@ onMounted(async () => {
 
         if (tab.url.includes('rplay.live')) {
           // Check if token already exists first
-          const stored = await chrome.storage?.local?.get('rplay_auth_token');
-          if (stored?.rplay_auth_token) {
-            rplaySyncState.value = 'synced';
-            rplaySyncMessage.value = '已同步登录凭证 ✓';
-          }
+          await markSyncedIfStored();
           // Also trigger live sync from tab
           triggerRplaySync();
         }

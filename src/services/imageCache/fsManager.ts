@@ -79,12 +79,16 @@ export async function verifyDirectoryPermission(
   handle: FileSystemDirectoryHandle,
   readWrite: boolean = true
 ): Promise<boolean> {
-  const options = { mode: (readWrite ? 'readwrite' : 'read') as FileSystemPermissionMode };
+  const options: { mode: 'read' | 'readwrite' } = { mode: readWrite ? 'readwrite' : 'read' };
   try {
-    if ((await handle.queryPermission(options)) === 'granted') {
+    const directoryHandle = handle as FileSystemDirectoryHandle & {
+      queryPermission?: (options?: { mode?: 'read' | 'readwrite' }) => Promise<PermissionState>;
+      requestPermission?: (options?: { mode?: 'read' | 'readwrite' }) => Promise<PermissionState>;
+    };
+    if ((await directoryHandle.queryPermission?.(options)) === 'granted') {
       return true;
     }
-    if ((await handle.requestPermission(options)) === 'granted') {
+    if ((await directoryHandle.requestPermission?.(options)) === 'granted') {
       return true;
     }
   } catch {

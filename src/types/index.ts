@@ -199,6 +199,10 @@ export interface Post {
   isRead: boolean;
   isBookmarked?: boolean;
   isRepost?: boolean; // 是否为转推 / 转发动态
+  authorMeta?: {
+    name?: string;
+    avatar?: string;
+  };
 }
 
 export interface AppSettings {

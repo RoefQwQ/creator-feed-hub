@@ -9,11 +9,13 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "esModuleInterop": true,
-    "lib": ["ESNext", "DOM"],
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "types": ["chrome"],
     "paths": {
       "~/*": ["./*"],
       "@/*": ["./src/*"]
     }
   },
-  "include": ["**/*.ts", "**/*.vue", "**/*.d.ts"]
+  "include": ["**/*.ts", "**/*.vue", "**/*.d.ts", ".wxt/wxt.d.ts"],
+  "exclude": ["node_modules", ".output"]
 }

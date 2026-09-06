@@ -1,0 +1,225 @@
+# Creator Feed Hub 开发手册
+
+> 面向在本仓库做增量功能与兼容式重构的开发说明。配合 `docs/ARCHITECTURE.md` 使用；本手册只讲“怎么改”，涉及现状与边界时以 ARCHITECTURE.md 为准。
+> 项目默认中文注释与中文用户文案；代码风格延续现有模块头注释 + JSDoc。
+
+## 1. 改动前边界清单
+
+每个增量功能开始前，先明确：
+
+```text
+问题：用户现在遇到什么具体问题？
+目标：完成后用户能观察到什么结果？
+非目标：本次明确不做什么？
+影响：UI、同步、平台、数据库、权限、导入导出分别是否受影响？
+兼容：旧数据库、旧 JSON、旧消息和旧平台是否继续可用？
+回滚：出问题时是否能关闭或恢复旧路径？
+验收：哪些可操作步骤证明功能完成？
+```
+
+仓库正处于兼容式重构中，额外三条铁律：
+- **Dashboard 四个页面 View 已完成接入**：`FeedView.vue`、`CreatorsView.vue`、`BookmarksView.vue`、`SettingsView.vue` 承载各自 Tab 模板，通过 context/emits 与 `App.vue` 通信。App.vue 仍保留跨页面组合、全局弹窗和部分应用动作，不能宣称入口层已完全变薄。
+- `useDashboardData` 只承载数据加载、媒体修复和统计刷新；回收站刷新仍由 Dashboard 组合流程协调，避免 composable 循环依赖。
+- 生产代码仍在大量使用兼容桶 `src/db`、`src/adapters`（见 §9 迁移边界）。改业务时可以继续从桶导入以保持最小 diff，但**新模块一律直接依赖真实实现**：`src/sync/*`、`src/platform/registry.ts`、`src/infrastructure/db/*`；兼容桶只允许 re-export，禁止在其中新增业务逻辑。
+
+## 2. 新功能模板（推荐实现顺序）
+
+按数据流从内向外，避免把业务堆进 `App.vue` 和 `background.ts`：
+
+```text
+类型/契约（src/types 或模块内类型）
+ → 领域规则（过滤/去重/水位/墓碑策略）
+ → 应用用例（src/sync/ 或新 composable）
+ → Repository / Platform Adapter / 消息 handler
+ → Composable（UI 状态与动作，经 actions 注入避免反向依赖）
+ → Vue 组件（components/ → 目标 views/）
+ → 入口接线（entrypoints/*/main.ts、App.vue 模板、background.ts 路由）
+ → 验证（§9）与提交（§10）
+```
+
+样例要点（以“在 Dashboard 增加按 XX 过滤”为例）：
+1. 若过滤属纯展示，先在 `App.vue` 的过滤 computed 链中追加（现状是 `filteredPosts` / `filteredBookmarkedPosts` 各自过滤）；不要复制一份 posts 数组。
+2. 若过滤会复用，再抽到 `entrypoints/dashboard/composables/useFeedFilters.ts`；抽离时通过参数/actions 注入依赖（参照 `useDeletedPosts`：它不 import App.vue，而是接收 `reloadData/refreshAll/getChannels/...` 回调），保证“搬迁职责、不复制逻辑”。
+3. 若该过滤应作用于同步（例如 `onlyOriginal` 语义扩展），改 `FetchOptions` + adapter 读取端，并在 `updateChannel` 的 mergedOptions 链路中生效；UI 只透传。
+4. 用户偏好要持久化就进 `AppSettings`（`src/types/index.ts` + `settingsRepository.DEFAULT_SETTINGS`），不要用孤立 localStorage 键；纯 UI 瞬时偏好（如隐藏创作者、主题）例外，可继续用 localStorage，键名加 `creator_feed_` 前缀。
+
+## 3. 新增平台接入
+
+1. 在 `src/adapters/` 新建 `<platform>.ts`，实现 `PlatformAdapter` 契约（`src/adapters/types.ts`）：
+   - 必实现 `fetchLatest(channel, limit, options)` → 归一化 `FetchResult`（`posts[]`、`authorMeta?`、`nextCursor?`、`hasMore?`、`error?`、`totalFetched?`）。
+   - 需要历史翻页 → `fetchHistory?`；需要第二请求通道 → `fetchAjaxFallback?`；需要页内 GraphQL/JSON 归一化 → `parseGraphQLResult?`；需要登录探测 → `checkAuthStatus?`（返回 `{ loggedIn, username? }`）。
+2. 请求统一走 `src/utils/http.ts` 的 `bgFetch()`（Background 代理，绕 CORS）；凡 CDN 图/媒体 URL 一律先过 `toSecureMediaUrl()`；热链严格平台按 §7.2 处理。
+3. 动态 id 前缀规则：`<platform>_<平台原生 id>`（参考 `bilibili_video_<bvid>`、`xiaohongshu_<noteId>`、`rss_<base64(guid) 32位>` 等），**勿随机数**（youtube 的随机回退仅为异常兜底）。
+4. 在 `src/platform/registry.ts` 的 `ADAPTER_MAP` 注册；不要改 `getAdapter` 的 rss 回退语义。
+5. 在 `src/types/index.ts` 增加 `Platform` 字面量、`PLATFORM_REGISTRY` 元数据（name/domain/color/`authType`/`urlPlaceholder`…）。
+6. 在 `src/utils/urlParser.ts` 增加 URL → `{ platform, accountId, cleanUrl }` 分支（注意域名顺序：`weibo.cn` 在 `weibo.com` 前等，避免子串误判；XHS 短链 `xhslink.com`、YouTube `youtu.be` 这类别名要并进同平台分支）。
+7. 若走 Cookie 登录：在 Dashboard `App.vue` 的 `checkPlatformLogins` 的 `platformsToCheck` 增加 `{ key, domain, authCookieNames }` 行（登录状态灯）；并在 `wxt.config.ts` 增加最小必要 host permission。
+8. 若走页面令牌（如 rplay 的 localStorage）：仿照 `rplay-sync.content.ts` + `SAVE_RPLAY_TOKEN`/`SYNC_RPLAY_TOKEN` 链路设计凭证采集与注入，不要在 adapter 里直接假设凭证存在。
+9. 平台头像/内容走“受限 CDN”：在 `src/infrastructure/chrome/declarativeNetRequest.ts` 增补规则时**必须分配新规则 id**（现占用 1001–1006，remove/add 列表同步扩展，保持幂等）。
+10. 验证不回归其他平台：增量过滤、去重、墓碑、收藏、图片缓存策略均与平台无关或按平台分支，新增平台不得改变既有分支行为。
+
+Platform Adapter 只负责请求与归一化：**不 import `src/db`/`src/infrastructure/db` 写库、不修改 Vue 状态**；写库统一发生在 `src/sync/channelSync.ts` 的落库段。
+
+## 4. 数据库变更
+
+入口：`src/infrastructure/db/database.ts`（schema）、`settingsRepository.ts`（默认值）、`postRepository.ts`（生命周期）。`src/db/index.ts` 是 re-export 桶。
+
+必须遵守：
+- 不改库名 `CreatorFeedHubDB`；**不删除/不重排**已发布 version 1–3（v1 四表、v2 posts 复合索引 `[channelId+publishedAt]`、v3 `deletedPostIds`）。
+- 新 schema 只 `version(4).stores({ ... })` 追加，且 stores 里要包含全部受影响表的**完整**索引声明（Dexie 按版本全量替换索引定义）。
+- 新增字段一律给旧数据默认兜底：对象型默认值在读取端合并（仿 `getSettings` 的 `{ ...DEFAULT_SETTINGS, ...item.value }`）；布尔/可选字段用 `?.` 与 `Boolean()` 收窄。
+- 导入旧 JSON 时允许缺新字段（现有 `handleImportFile` 逐表 `bulkPut`，天然容忍）。
+- `Post.id`、`Channel.id` 生成规则不可变；迁移旧数据只允许“同 id 改写字段”，不允许改名。
+- 删除动态必须经 `deletePostAndTombstone`（写墓碑+快照），恢复经 `restoreDeletedPost(s)`；**禁止裸 `db.posts.delete`**（同步会复活）。
+- 大表操作优先索引：水位查询用 `where('channelId').equals(...).reverse().sortBy('publishedAt')`；存在性判断用 `primaryKeys()` 而不是 `toArray()`（channelSync 已示范）。
+- 涉及文件系统缓存句柄的改动与业务库无关：那是独立的 `FeedHubFSCache` 库（`fsManager.ts` 内维护）。
+
+## 5. 消息协议变更（Runtime Message）
+
+协议总表见 ARCHITECTURE.md §6。改动步骤：
+
+1. 先全局搜索该 type 的**发送方**与**接收方**（现网发送方：`utils/http.ts`、`utils/media.ts`、`popup/composables/useRplaySync.ts`、`popup/App.vue`、`dashboard/App.vue`、`rplay-sync.content.ts`；接收方：`entrypoints/background.ts` 路由 + `src/infrastructure/chrome/messages/*.ts` handler）。
+2. 同步修改五件套：
+   - type 名称（涉及两端字符串字面量）；
+   - 入参解析与校验（handler 内局部接口 + `typeof` 收窄；外部数据用 `unknown` 收窄，不用 `any`）；
+   - `sendResponse` 出参结构（handler 文件顶部注释固化契约，一并更新）；
+   - 异步语义：凡 handler 内部是 async 的，必须 `return true` 保持消息通道（bgFetch/proxyImage/rplaySync/twitterTimeline 四个 handler 均如此，新增 handler 照抄）；
+   - 发送方错误处理（`chrome.runtime.lastError`、`res` 为空、`ok/success` 为 false 的文案）。
+3. handler 不直接承担 Vue 状态或数据库业务；复杂业务抽到 `src/sync` 或独立服务再被 handler 调用（参考 autoSync 的 `setupAutoSync/handleAutoSyncAlarm` 分层）。
+4. 同步类消息（如 `UPDATE_AUTO_SYNC`）要能被 Dashboard 设置页即时触发且幂等（先 clear 再 create Alarm 的写法）。
+5. 契约变更完成后必须做扩展运行时验证（真实加载扩展跑一遍两端），仅 `tsc` 通过不算数。
+
+现状：App.vue 是跨页面组合层，四个 Tab 已分别由真实 View 承载；仍有部分应用动作与弹窗待继续下沉。拆分工作按以下纪律推进：
+
+1. **一次只搬一个低耦合块**，顺序建议：纯状态 composable → 弹窗/面板组件 → 一个 Tab 的模板段（搬进对应 `views/<Name>View.vue`）→ 该 Tab 的 handlers/computed 随模板同迁 → 删除 `App.vue` 中残留。
+2. 抽 composable 用“依赖注入”而非“import App.vue”：`useDeletedPosts(actions)` 是样板——把需要的外部能力以回调参数传入，内部只持有自己的 ref/computed；绝不允许 composable 反向 import `App.vue`。
+3. 抽组件：props 收数据、emits 抛动作（参照 `PostCard` 的 `bookmark/delete/read/media/avatarError` 事件）；组件内不允许直接 import `App.vue`，业务动作继续上抛由父级（最终是 composable/App.vue）执行。
+4. `DashboardSection` 可作各 Tab section 的通用容器；页面 View 负责真实模板与本地展示状态，不直接操作基础设施。
+5. 拆分是纯搬迁：`git diff` 应表现为“代码位置移动 + import 调整”，不允许顺手改行为、改文案、改样式类（除非 bug 明确）。
+6. 每拆完一步立即 `npm run build` + 手动回归对应 Tab；commit 粒度按“一个边界一次提交”。
+7. 迁移收尾（独立提交）：全部调用方切到真实实现后，再删除 `src/adapters/index.ts` 与 `src/db/index.ts` 中的兼容 re-export（或降级为仅类型导出）。
+
+## 7. 增量功能交付模板
+
+每个功能使用独立变更说明，禁止只写“完成重构”这类不可验收描述：
+
+```text
+功能名：
+问题与用户场景：
+目标行为：
+非目标与不变行为：
+影响面：types / domain / sync / adapter / db / message / UI / permission
+契约变更：字段、消息、ID、索引；无变更也必须明确写“无”
+迁移策略：旧数据、旧调用方、旧导入文件如何兼容
+失败与恢复：超时、限流、网络错误、用户取消、重复执行
+实现文件：真实实现与兼容导出分别列出
+验证命令：构建、类型、静态检查、运行时手测步骤
+验收证据：命令输出、关键页面/消息往返、已知未覆盖项
+回滚方式：关闭开关、恢复数据库备份或回退提交
+```
+
+提交前必须回答：
+
+1. 是否新增了第二份业务实现？如果是，停止并改为迁移或委托。
+2. 是否改变了旧用户数据、动态 ID、收藏/墓碑或消息协议？如果是，补充迁移与兼容验证。
+3. 是否把基础设施调用放进了 View 或入口？如果是，移动到应用层/Repository。
+4. 验证是否覆盖了实际用户可观察行为，而不仅是类型检查？本轮已完成构建、类型与纯函数冒烟；真实扩展点击回归因用户明确禁止操作当前浏览器而保留为未覆盖项。
+5. 文档是否准确描述“已完成”与“迁移中”的边界？
+
+## 8. 变更记录格式
+
+```text
+日期：YYYY-MM-DD
+变更：一句话
+行为保持：列出关键不变契约
+结构变化：列出新增模块、兼容入口和依赖方向
+验证：实际执行的命令和结果
+风险：未覆盖的运行时平台或权限场景
+```
+## 9. 平台请求与图片
+
+### 9.1 请求纪律
+- 一切跨域走 `bgFetch()`；扩展环境不要直连 `fetch`（页面 CORS / 受限头会失败）。
+- `fetch` 无法手工设置 `Cookie`/`User-Agent`/`Referer`/`Origin` 等受限头：B 站登录靠 `credentials:'include'` + host_permissions 自动带 Cookie；UA 用浏览器自己的。不要把 UA/Referer 塞进 BG_FETCH headers 期望生效。
+- 遵守平台节流：adapter 不做无界循环；批量/深挖的间隔由 sync 层保证（§9.3 表）。
+
+### 9.2 图片三件套
+- 入库前：`toSecureMediaUrl()` 归一化（协议补全、小红书 avatar → `sns-avatar-qc.xhscdn.com`、XHS 永久 fileId 直链等已在 `utils/media.ts` 处理，改动先读该文件与 `postRepository.healBrokenPostMedia`）。
+- 渲染失败：先 `markImageFailed`，再 `proxyImage()`（`PROXY_IMAGE` 消息、候选 URL 列表、data URL）；不要在组件里重复实现 base64 转换（`handleProxyImage` 已有，含 8192 分块避免栈溢出）。
+- 离线缓存：`src/services/imageCache/`（File System Access）。写盘只在用户绑定目录后；目录选择必须由用户手势触发；路径分段由 `resolvePostDirSegments` 决定（`[创作者名, 平台中文名, YYYYMMDD_短id]`），文件名经 `sanitizePathSegment` 净化。
+- DNR 规则 id 空间：1001–1006 已占用，新规则从 1007 起；`removeRuleIds` 列表与 `addRules` 必须同步更新，保持幂等。
+
+### 9.3 同步保护速查（改动冷却/间隔前先看）
+
+| 语义 | 现值 | 位置 |
+|---|---|---|
+| 单频道成功冷却 | 30 s | `sync/channelSync.ts` |
+| 单请求超时 | 45 s | `sync/channelSync.ts` |
+| 历史到底 | `nextCursor='__END__'` | `sync/channelSync.ts` |
+| 批量同平台最小间隔 | 800 ms 默认 | `sync/batchSync.ts`（`minPlatformIntervalMs`） |
+| updateCreator 间隔 | 600 ms | `sync/batchSync.ts` |
+| 深挖每轮 / 轮间 | 20 条 / 900 ms | `sync/historySync.ts` |
+| 深挖空轮上限 | 4 | `sync/historySync.ts` |
+| 自动同步周期 | 30 min Alarm | `infrastructure/chrome/autoSync.ts` |
+| 未读角标 | 上限 999、色 `#4f46e5` | `infrastructure/chrome/autoSync.ts` |
+
+调小即提高风控风险：**只允许在明确产品决策下改动，并更新本表。**
+
+## 10. 安全与隐私红线
+
+- 扩展申请了 `cookies/tabs/scripting/activeTab` 与大量 host permissions；新增平台/域必须先问“是否最小必要”，host permission 只加实际请求与 `<img>` 直连的域。
+- 不要在源码、备份 JSON、日志中夹带用户 Cookie/Token/密钥。x.com guest bearer token 是公开常量（已内联在 `twitterTimeline.ts`），不要把它误当密钥挪进配置。
+- `scripting.executeScript` 注入的函数体必须是**自包含纯函数**（序列化传参，如 twitterTimeline 的 tab func），不要从扩展作用域捕获敏感对象；执行前对目标 URL/平台做白名单判断，禁止对任意页面注入。
+- 对 `chrome://`、`edge://`、`about:`、`devtools:` 页面一律跳过 DOM 注入（Popup 已有该判断，新增注入点照做）。
+- 外部数据（平台 HTML/JSON、备份文件、消息载荷）一律当作 `unknown`/不可信输入：解析用可选链 + 类型收窄 + try/catch，禁止把响应直接当强类型用；新边界不用 `any`。
+- 删除类操作必须二次确认；清理动态不得触碰 `isBookmarked`（`cleanupOldPosts` 语义）；恢复操作前如有同名 id 用 put/bulkPut 覆盖语义而非报错。
+- Rplay 凭证是 `localStorage`/`chrome.storage.local` 明文令牌：只在本机扩展存储间流转，不随 JSON 备份导出（现状导出不含 `rplay_auth_token`，保持）。
+
+## 11. 验证规范
+
+- 构建/类型：`npm run build` 与 `npx tsc --noEmit` 必须通过；项目通过 `@types/chrome` 和 `types/env.d.ts` 提供 Chrome API、Vue SFC、CSS 模块声明。
+- 加载方式：`chrome://extensions/` 开发者模式加载 `.output/chrome-mv3/`，代码更新后重新构建并点“重新加载”；扩展页不更新先怀疑旧产物。
+- 消息/后台改动必须**扩展运行时验证**（Popup/Dashboard ↔ background 真实往返），纯 `tsc` 通过不算。
+- 最小手动回归清单（按改动面裁剪）：
+  - Popup 打开并识别一个平台主页；
+  - 新建创作者并绑定平台账号（首轮同步触发）；
+  - Dashboard 加载既有动态；单频道/单创作者/全部刷新；强制刷新；
+  - 历史翻页与深度回溯、到底标记、中止；
+  - 收藏、已读、删除→回收站→还原/彻底删除、清理旧动态；
+  - 标签/平台/隐藏/转发/纯文字过滤与搜索；
+  - 导出 JSON 并重新导入；
+  - Rplay 凭证同步（页面自动/主动拉取/手动粘贴）与 rplay 抓取；
+  - 图片直连/代理回退/失败占位/本地磁盘缓存绑定与批量缓存；
+  - 自动同步开关与未读角标。
+- 无法运行扩展的场景：用**一次性脚本**做单元冒烟（例如非扩展环境 `bgFetch` 的直连兜底、纯函数如 `parseProfileUrl`/`toSecureMediaUrl`/`interleaveChannelsByPlatform`），跑完即删，不留在仓库当测试。
+- 性能改动自检：优先既有索引（`[channelId+publishedAt]`、`isBookmarked` 等），不新增全表扫描式展示查询；UI 不重复拉取同一批数据；批量写用 `bulkPut/bulkDelete`；存在性判断用 `primaryKeys()`；内存里复制大数组前先想清楚是否必要。
+- 新测试只为一个真正不确定的边界而写（例如新平台日期解析、水位/去重交互）；不要为了“有测试”而写。断言可观察契约与真实错误，不钉实现细节。
+
+## 10. 提交规范
+
+提交前逐项确认：
+
+```text
+[ ] 未改变数据库库名、已有 schema 版本或动态/频道 id 规则
+[ ] 未改变 Runtime Message 名称与返回结构，或已迁移全部发送方/接收方并运行时验证
+[ ] 新平台未直接写数据库或修改 Vue 状态
+[ ] 兼容 import 路径仍有效，或已完成全部调用方迁移
+[ ] 没有复制同步/数据库逻辑，没有新增无意义兼容别名
+[ ] 没有声称未完成的 Dashboard View 重构已完成（文档/PR 描述如实）
+[ ] npm run build 通过；相关核心流程已手动回归
+[ ] git diff --check 通过
+[ ] git status --short --ignored 未包含数据库、凭证与构建产物（.output/、.e2e-profile/ 等已忽略）
+```
+
+```bash
+git diff --check
+git status --short --ignored
+```
+
+提交粒度：单功能或单结构边界一个 commit，信息用描述性中文或现有提交风格（如 `feat(cache): …`、`fix(media): …`、`docs: …`）：
+
+```bash
+git add .
+git commit -m "feat(xxx): 描述变更"
+git push
+```

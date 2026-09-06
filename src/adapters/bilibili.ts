@@ -36,7 +36,11 @@ export const bilibiliAdapter: PlatformAdapter = {
     const sinceTs = options?.cursor ? 0 : (options?.sinceTimestamp ?? 0);
 
     if (options?.cursor) {
-      return this.fetchHistory(channel, uid, limit, options, authorName, authorAvatar);
+      const fetchHistory = this.fetchHistory;
+      if (!fetchHistory) {
+        return { posts: [], error: 'Bilibili historical fetch is unavailable' };
+      }
+      return fetchHistory.call(this, channel, uid, limit, options, authorName, authorAvatar);
     }
 
     const allPosts: Post[] = [];

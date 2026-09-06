@@ -22,14 +22,14 @@ export const weiboAdapter: PlatformAdapter = {
       });
 
       if (!indexRes.ok) {
-        return await this.fetchAjaxFallback(channel, limit, page, options);
+        return await this.fetchAjaxFallback!(channel, limit, page, options);
       }
 
       let indexJson: any;
       try {
         indexJson = JSON.parse(indexRes.data);
       } catch {
-        return await this.fetchAjaxFallback(channel, limit, page, options);
+        return await this.fetchAjaxFallback!(channel, limit, page, options);
       }
 
       const userInfo = indexJson.data?.userInfo || {};
@@ -58,14 +58,14 @@ export const weiboAdapter: PlatformAdapter = {
       });
 
       if (!timelineRes.ok) {
-        return await this.fetchAjaxFallback(channel, limit, page, options);
+        return await this.fetchAjaxFallback!(channel, limit, page, options);
       }
 
       let timelineJson: any;
       try {
         timelineJson = JSON.parse(timelineRes.data);
       } catch {
-        return await this.fetchAjaxFallback(channel, limit, page, options);
+        return await this.fetchAjaxFallback!(channel, limit, page, options);
       }
 
       const cards = timelineJson.data?.cards || [];

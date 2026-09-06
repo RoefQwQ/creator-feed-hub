@@ -30,5 +30,31 @@ export interface PlatformAdapter {
   platform: string;
   fetchLatest(channel: Channel, limit?: number, options?: FetchOptions): Promise<FetchResult>;
   checkAuthStatus?(): Promise<{ loggedIn: boolean; username?: string }>;
+
+  /** Optional platform-specific historical fetch implementation. */
+  fetchHistory?(
+    channel: Channel,
+    uid: string,
+    limit: number,
+    options: FetchOptions,
+    authorName?: string,
+    authorAvatar?: string,
+  ): Promise<FetchResult>;
+  /** Optional platform-specific fallback request implementation. */
+  fetchAjaxFallback?(
+    channel: Channel,
+    limit: number,
+    page: number,
+    options?: FetchOptions,
+  ): Promise<FetchResult>;
+  /** Optional platform-specific response normalizer. */
+  parseGraphQLResult?(
+    channel: Channel,
+    tweetData: unknown,
+    userData: unknown,
+    limit: number,
+    onlyOriginal?: boolean,
+    bottomCursor?: string,
+  ): FetchResult;
 }
 
