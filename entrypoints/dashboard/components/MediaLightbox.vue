@@ -30,7 +30,7 @@ async function handleImgError(e: Event, originalUrl?: string) {
       </div>
     </div>
     <div class="flex-1 flex items-center justify-center p-2 min-h-0" @click="emit('close')">
-      <img :src="secure(media.url)" class="max-w-full max-h-[82vh] object-contain rounded-xl shadow-2xl transition-all select-none" @error="handleImgError($event, media.url)" @click.stop />
+      <img :src="secure(media.url)" referrerpolicy="no-referrer" class="max-w-full max-h-[82vh] object-contain rounded-xl shadow-2xl transition-all select-none" @error="handleImgError($event, media.url)" @click.stop />
     </div>
     <div class="text-center text-[11px] text-white/40">点击遮罩或按 ESC 键即可退出大图模式</div>
   </div>

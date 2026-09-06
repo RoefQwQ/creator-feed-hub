@@ -206,11 +206,7 @@ async function updateUnreadBadge() {
                 method: 'GET',
                 headers: {
                   Referer: referer,
-                  Origin: origin,
                   Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-                  'Sec-Fetch-Dest': 'image',
-                  'Sec-Fetch-Mode': 'no-cors',
-                  'Sec-Fetch-Site': 'cross-site',
                 },
                 // Use 'include' so extension host permissions attach user's authenticated cookies (e.g. web_session, a1)
                 credentials: isXhs ? 'include' : 'omit',

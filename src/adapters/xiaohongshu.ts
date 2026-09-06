@@ -164,11 +164,27 @@ export const xiaohongshuAdapter: PlatformAdapter = {
       allPosts.sort((a, b) => b.publishedAt - a.publishedAt);
 
       // Support cursor-based pagination for history digging (offset)
-      const isHistoryDig = Boolean(options?.cursor);
+      const isHistoryDig = Boolean(options?.cursor !== undefined || options?.isHistory);
+      const isForce = Boolean(options?.forceRefresh);
       const offset = isHistoryDig ? Math.max(Number(options?.cursor) || 0, 0) : 0;
-      const targetPosts = allPosts.slice(offset, offset + limit);
+
+      // If history digging has already reached or exceeded the end of SSR notes list
+      if (isHistoryDig && !isForce && offset >= allPosts.length) {
+        return {
+          posts: [],
+          authorMeta: {
+            name: authorName,
+            avatar: authorAvatar,
+          },
+          hasMore: false,
+          error: `已同步该博主主页展示的全部公开作品（共 ${allPosts.length} 篇，小红书网页端受反爬风控限制无法继续无限滚动翻页）。`,
+        };
+      }
+
+      // When force refreshing, return all parsed posts so old items get updated/healed
+      const targetPosts = isForce ? allPosts : allPosts.slice(offset, offset + limit);
       const nextOffset = offset + targetPosts.length;
-      const hasMore = nextOffset < allPosts.length;
+      const hasMore = !isForce && nextOffset < allPosts.length;
 
       return {
         posts: targetPosts,

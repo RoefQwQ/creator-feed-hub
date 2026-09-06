@@ -1,5 +1,6 @@
 import Dexie, { type Table } from 'dexie';
 import type { Creator, Channel, Post, AppSettings, DeletedPostRecord } from '../types';
+import { toSecureMediaUrl } from '../utils/media';
 
 export class FeedDatabase extends Dexie {
   creators!: Table<Creator, string>;
@@ -221,20 +222,29 @@ export async function healBrokenPostMedia(): Promise<number> {
     let modified = false;
     if (post.mediaList && post.mediaList.length > 0) {
       for (const media of post.mediaList) {
-        if (media.previewUrl && (media.previewUrl.includes('sns-webpic-qc.xhscdn.com') || media.previewUrl.includes('sns-webpic.xhscdn.com'))) {
-          media.previewUrl = media.previewUrl.replace(/sns-webpic(-qc)?\.xhscdn\.com/g, 'sns-img-qc.xhscdn.com');
-          modified = true;
+        if (media.previewUrl) {
+          const healed = toSecureMediaUrl(media.previewUrl);
+          if (healed && healed !== media.previewUrl) {
+            media.previewUrl = healed;
+            modified = true;
+          }
         }
-        if (media.originalUrl && (media.originalUrl.includes('sns-webpic-qc.xhscdn.com') || media.originalUrl.includes('sns-webpic.xhscdn.com'))) {
-          media.originalUrl = media.originalUrl.replace(/sns-webpic(-qc)?\.xhscdn\.com/g, 'sns-img-qc.xhscdn.com');
-          modified = true;
+        if (media.originalUrl) {
+          const healed = toSecureMediaUrl(media.originalUrl);
+          if (healed && healed !== media.originalUrl) {
+            media.originalUrl = healed;
+            modified = true;
+          }
         }
       }
     }
 
-    if (post.authorMeta?.avatar && post.authorMeta.avatar.includes('sns-webpic-qc.xhscdn.com')) {
-      post.authorMeta.avatar = post.authorMeta.avatar.replace('sns-webpic-qc.xhscdn.com', 'sns-img-qc.xhscdn.com');
-      modified = true;
+    if (post.authorMeta?.avatar) {
+      const healedAvatar = toSecureMediaUrl(post.authorMeta.avatar);
+      if (healedAvatar && healedAvatar !== post.authorMeta.avatar) {
+        post.authorMeta.avatar = healedAvatar;
+        modified = true;
+      }
     }
 
     if (modified) {
@@ -246,9 +256,11 @@ export async function healBrokenPostMedia(): Promise<number> {
   // Also check channels avatarUrl
   const xhsChannels = await db.channels.where('platform').equals('xiaohongshu').toArray();
   for (const ch of xhsChannels) {
-    if (ch.avatarUrl && ch.avatarUrl.includes('sns-webpic-qc.xhscdn.com')) {
-      const fixed = ch.avatarUrl.replace('sns-webpic-qc.xhscdn.com', 'sns-img-qc.xhscdn.com');
-      await db.channels.update(ch.id, { avatarUrl: fixed });
+    if (ch.avatarUrl) {
+      const fixed = toSecureMediaUrl(ch.avatarUrl);
+      if (fixed && fixed !== ch.avatarUrl) {
+        await db.channels.update(ch.id, { avatarUrl: fixed });
+      }
     }
   }
 

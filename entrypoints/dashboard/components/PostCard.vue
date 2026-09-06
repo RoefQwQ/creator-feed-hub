@@ -63,7 +63,7 @@ const openMedia = (url: string, type: string) => emit('media', { url, originalUr
     <div class="p-4 border-b border-slate-100 dark:border-slate-800/60 flex items-center justify-between">
       <div class="flex items-center gap-2.5 min-w-0">
         <div class="w-8 h-8 rounded-full bg-slate-100 dark:bg-slate-800 shrink-0 flex items-center justify-center text-xs font-bold text-indigo-600 overflow-hidden border border-slate-200 dark:border-slate-700 shadow-2xs group-hover/card:scale-105 transition-transform duration-200">
-          <img v-if="avatar" :src="secure(avatar)" class="w-full h-full object-cover" @error="emit('avatarError', avatar)" />
+          <img v-if="avatar" :src="secure(avatar)" referrerpolicy="no-referrer" class="w-full h-full object-cover" @error="emit('avatarError', avatar)" />
           <span v-else>{{ authorName.slice(0, 1) }}</span>
         </div>
         <div class="min-w-0">
@@ -91,15 +91,15 @@ const openMedia = (url: string, type: string) => emit('media', { url, originalUr
       <p v-if="post.content" class="text-xs text-slate-600 dark:text-slate-300 line-clamp-4 whitespace-pre-wrap leading-relaxed">{{ post.content }}</p>
       <div v-if="post.mediaList?.length" class="pt-1">
         <div v-if="post.mediaList.length === 1 && post.mediaList[0].type === 'video'" @click.stop="openMedia(post.mediaList[0].previewUrl, 'video')" class="relative aspect-video rounded-xl overflow-hidden bg-slate-900 cursor-pointer group/vid flex items-center justify-center">
-          <img :src="secure(post.mediaList[0].previewUrl)" loading="lazy" class="w-full h-full object-cover opacity-90 group-hover/vid:scale-105 transition-transform duration-300" @error="handleMediaError($event, post.mediaList[0].previewUrl)" />
+          <img :src="secure(post.mediaList[0].previewUrl)" referrerpolicy="no-referrer" loading="lazy" class="w-full h-full object-cover opacity-90 group-hover/vid:scale-105 transition-transform duration-300" @error="handleMediaError($event, post.mediaList[0].previewUrl)" />
           <Film class="absolute w-11 h-11 p-3 rounded-full bg-white/30 backdrop-blur-xs text-white fill-white shadow-lg group-hover/vid:scale-110 transition-transform duration-200" />
         </div>
         <div v-else-if="post.mediaList.length === 1" @click.stop="openMedia(post.mediaList[0].previewUrl, 'image')" class="relative min-h-[160px] max-h-[460px] rounded-xl overflow-hidden bg-slate-100 dark:bg-slate-800 cursor-zoom-in group/img flex items-center justify-center">
-          <img :src="secure(post.mediaList[0].previewUrl)" loading="lazy" class="w-full h-full max-h-[460px] object-cover group-hover/img:scale-103 transition-transform duration-300 ease-out" @error="handleMediaError($event, post.mediaList[0].previewUrl)" />
+          <img :src="secure(post.mediaList[0].previewUrl)" referrerpolicy="no-referrer" loading="lazy" class="w-full h-full max-h-[460px] object-cover group-hover/img:scale-103 transition-transform duration-300 ease-out" @error="handleMediaError($event, post.mediaList[0].previewUrl)" />
         </div>
         <div v-else :class="post.mediaList.length === 2 ? 'grid grid-cols-2 gap-2 aspect-[16/11]' : post.mediaList.length <= 4 ? 'grid grid-cols-2 gap-1.5 aspect-square' : 'grid grid-cols-3 gap-1.5'">
           <div v-for="(media, index) in post.mediaList.slice(0, post.mediaList.length > 4 ? 6 : undefined)" :key="index" @click.stop="openMedia(media.originalUrl || media.previewUrl, media.type)" class="relative aspect-square rounded-lg overflow-hidden bg-slate-100 dark:bg-slate-800 cursor-zoom-in group/gallery">
-            <img :src="secure(media.previewUrl)" loading="lazy" class="w-full h-full object-cover group-hover/gallery:scale-105 transition-transform duration-300 ease-out" @error="handleMediaError($event, media.previewUrl)" />
+            <img :src="secure(media.previewUrl)" referrerpolicy="no-referrer" loading="lazy" class="w-full h-full object-cover group-hover/gallery:scale-105 transition-transform duration-300 ease-out" @error="handleMediaError($event, media.previewUrl)" />
             <span v-if="index === 5 && post.mediaList.length > 6" class="absolute inset-0 bg-black/60 backdrop-blur-2xs flex items-center justify-center text-white font-bold text-xs">+{{ post.mediaList.length - 6 }}</span>
           </div>
         </div>

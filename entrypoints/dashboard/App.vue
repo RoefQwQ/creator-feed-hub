@@ -922,7 +922,8 @@ async function handleRefreshChannel(channel: Channel, forceRefresh: boolean = fa
     alert('【操作过于频繁】该账号在 8 秒内刚执行过同步。为保护账号免受平台限流，请稍等片刻后再试。');
     return;
   }
-  const res = await updateChannel(channel, settings.value.itemsPerFetch, true, {
+  const fetchLimit = forceRefresh ? 100 : settings.value.itemsPerFetch;
+  const res = await updateChannel(channel, fetchLimit, true, {
     onlyOriginal: hideReposts.value,
     forceRefresh,
   });
@@ -1252,6 +1253,7 @@ const deepSyncTargetCount = ref<number>(50);
 const deepSyncCustomCount = ref<number>(50);
 const deepSyncTimeRange = ref<number>(30); // in days: 30, 90, 180, 365, 0 (all)
 const deepSyncOnlyOriginal = ref<boolean>(false);
+const deepSyncResetCursor = ref<boolean>(false);
 const isDeepSyncRunning = ref<boolean>(false);
 const deepSyncAbortRequested = ref<boolean>(false);
 const deepSyncLogs = ref<string[]>([]);
@@ -1271,6 +1273,7 @@ function openDeepSyncModal(creator: Creator, specificChannelId?: string) {
   deepSyncCustomCount.value = 50;
   deepSyncTimeRange.value = 30;
   deepSyncOnlyOriginal.value = hideReposts.value;
+  deepSyncResetCursor.value = false;
   isDeepSyncRunning.value = false;
   deepSyncAbortRequested.value = false;
   deepSyncLogs.value = [];
@@ -1313,6 +1316,7 @@ async function startDeepSync() {
       maxPosts: maxPostsPerChannel,
       untilTimestamp,
       onlyOriginal: deepSyncOnlyOriginal.value,
+      forceResetCursor: deepSyncResetCursor.value,
       shouldStop: () => deepSyncAbortRequested.value,
       onProgress: (info) => {
         if (info.status === 'fetching' && info.fetchedThisRound > 0) {
@@ -3888,6 +3892,20 @@ function formatTime(timestamp: number) {
             </div>
             <input
               v-model="deepSyncOnlyOriginal"
+              :disabled="isDeepSyncRunning"
+              type="checkbox"
+              class="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"
+            />
+          </div>
+
+          <!-- Reset Cursor Option -->
+          <div class="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-850 rounded-xl border border-slate-200/70 dark:border-slate-800 text-xs">
+            <div class="space-y-0.5">
+              <div class="font-medium text-slate-800 dark:text-slate-200">重置历史进度（重新深度扫描）</div>
+              <div class="text-[11px] text-slate-400">若此前已显示到头或需重新扫描修复旧数据，勾选此项重置断点并重新回溯</div>
+            </div>
+            <input
+              v-model="deepSyncResetCursor"
               :disabled="isDeepSyncRunning"
               type="checkbox"
               class="w-4 h-4 text-indigo-600 rounded border-slate-300 focus:ring-indigo-500 cursor-pointer"

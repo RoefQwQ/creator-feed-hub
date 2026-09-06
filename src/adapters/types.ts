@@ -3,6 +3,8 @@ import type { Channel, Post } from '../types';
 export interface FetchOptions {
   onlyOriginal?: boolean;
   cursor?: string;
+  /** Set to true when digging older historical posts */
+  isHistory?: boolean;
   /** Only fetch posts published after this timestamp (ms). Used for incremental sync. */
   sinceTimestamp?: number;
   /** If true, include previously deleted posts and clear their tombstone records upon fetch */
@@ -20,6 +22,8 @@ export interface FetchResult {
   nextCursor?: string;
   hasMore?: boolean;
   error?: string;
+  /** Total raw posts returned by adapter in this batch before DB deduplication */
+  totalFetched?: number;
 }
 
 export interface PlatformAdapter {

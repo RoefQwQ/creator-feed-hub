@@ -93,9 +93,15 @@ export async function updateChannel(
 
     // For normal (non-paginated) syncs, find the newest post already in DB to use as a watermark.
     // This tells adapters to only return content *newer* than what we already have.
-    // When restoreDeleted or forceRefresh is true, bypass sinceTimestamp to allow fetching previously deleted or existing posts.
+    // When restoreDeleted, forceRefresh, cursor, or isHistory is true, bypass sinceTimestamp.
     let sinceTimestamp = options?.sinceTimestamp ?? 0;
-    if (!sinceTimestamp && !options?.cursor && !options?.restoreDeleted && !options?.forceRefresh) {
+    if (
+      !sinceTimestamp &&
+      !options?.cursor &&
+      !options?.isHistory &&
+      !options?.restoreDeleted &&
+      !options?.forceRefresh
+    ) {
       try {
         const latestPost = await db.posts
           .where('channelId')
@@ -126,21 +132,30 @@ export async function updateChannel(
     // Save or upsert posts (ensure channelLabel is populated)
     if (result.posts && result.posts.length > 0) {
       // Universal incremental filter:
-      // 1. Normal sync (sinceTimestamp > 0 && !forceRefresh): drop posts where publishedAt <= sinceTimestamp (already stored)
-      // 2. History dig (options?.cursor set): drop posts whose ID already exists in DB so only new older items are added
+      // 1. Force refresh: upsert all posts to heal media/content
+      // 2. History dig (isHistory or cursor): upsert duplicates quietly to heal media, only add new IDs
+      // 3. Normal sync (sinceTimestamp > 0): drop posts where publishedAt <= sinceTimestamp
       let newPosts = result.posts;
       if (options?.forceRefresh) {
-        // When force-refreshing, do not filter out existing posts; upsert them to heal media/content
-      } else if (sinceTimestamp > 0) {
-        newPosts = result.posts.filter(p => p.publishedAt > sinceTimestamp);
-      } else if (options?.cursor) {
+        // When force-refreshing, do not filter out existing posts; upsert them all to heal media/content
+      } else if (options?.isHistory || options?.cursor !== undefined) {
         try {
           // Use primaryKeys() instead of toArray() to avoid pulling full object payloads into memory
           const existingIds = new Set(
             await db.posts.where('channelId').equals(channel.id).primaryKeys()
           );
+          // Quietly upsert existing posts to ensure their media and details are fresh/healed
+          const duplicatePosts = result.posts.filter(p => existingIds.has(p.id));
+          if (duplicatePosts.length > 0) {
+            await db.posts.bulkPut(duplicatePosts.map(p => ({
+              ...p,
+              channelLabel: p.channelLabel || channel.label,
+            })));
+          }
           newPosts = result.posts.filter(p => !existingIds.has(p.id));
         } catch {}
+      } else if (sinceTimestamp > 0) {
+        newPosts = result.posts.filter(p => p.publishedAt > sinceTimestamp);
       }
 
       // Filter out deleted posts by default; if restoreDeleted is true, clear them from deletedPostIds
@@ -199,13 +214,16 @@ export async function updateChannel(
     };
 
     // Cursor handling:
-    // When doing a historical dig (options?.cursor is present):
-    if (options?.cursor) {
+    // When doing a historical dig (isHistory or cursor is present):
+    if (options?.isHistory || options?.cursor !== undefined) {
       if (result.nextCursor) {
         updates.nextCursor = result.nextCursor;
       } else if (result.hasMore === false) {
         updates.nextCursor = '__END__';
       }
+    } else if (options?.forceRefresh) {
+      // On force-refresh, update nextCursor to whatever fresh state was returned
+      updates.nextCursor = result.nextCursor || undefined;
     } else {
       // Normal sync (fetching latest):
       // Only set nextCursor if channel currently has no cursor at all.
@@ -284,6 +302,7 @@ export async function updateChannel(
     return {
       ...result,
       posts: enhancedPosts,
+      totalFetched: result.posts?.length || 0,
     };
   } catch (err: any) {
     const friendlyError = normalizeErrorMessage(err?.message || '未知异常');
@@ -430,6 +449,7 @@ export async function fetchChannelHistory(
 
   return await updateChannel(channel, limit, true, {
     cursor: channel.nextCursor,
+    isHistory: true,
     onlyOriginal,
   });
 }
@@ -438,6 +458,7 @@ export interface DeepSyncOptions {
   maxPosts?: number; // 0: unconstrained / dig to the end
   untilTimestamp?: number; // 0: no date limit
   onlyOriginal?: boolean;
+  forceResetCursor?: boolean;
   onProgress?: (info: {
     channelId: string;
     displayName: string;
@@ -461,8 +482,13 @@ export async function deepSyncChannel(
 ): Promise<{ totalNew: number; reachEnd: boolean; rounds: number; error?: string }> {
   let totalNew = 0;
   let rounds = 0;
+  let consecutiveEmptyRounds = 0;
   const maxPosts = options.maxPosts || 0;
   const untilTimestamp = options.untilTimestamp || 0;
+
+  if (options.forceResetCursor) {
+    await db.channels.update(channel.id, { nextCursor: undefined });
+  }
 
   while (true) {
     if (options.shouldStop?.()) {
@@ -508,7 +534,16 @@ export async function deepSyncChannel(
 
     const res = await fetchChannelHistory(currentCh, 20, options.onlyOriginal);
     const newCount = res.posts?.length || 0;
+    const rawFetched = res.totalFetched ?? newCount;
     totalNew += newCount;
+
+    if (newCount === 0) {
+      consecutiveEmptyRounds++;
+    } else {
+      consecutiveEmptyRounds = 0;
+    }
+
+    const isFinished = Boolean(res.hasMore === false || rawFetched === 0);
 
     options.onProgress?.({
       channelId: channel.id,
@@ -517,17 +552,17 @@ export async function deepSyncChannel(
       round: rounds,
       fetchedThisRound: newCount,
       totalNewPosts: totalNew,
-      reachEnd: Boolean(res.hasMore === false || res.posts.length === 0),
+      reachEnd: isFinished,
       status: res.error ? 'error' : 'fetching',
       error: res.error,
     });
 
-    if (res.error || !res.posts || res.posts.length === 0 || res.hasMore === false) {
+    if (res.error || isFinished || consecutiveEmptyRounds >= 4) {
       break;
     }
 
     // Check if reached untilTimestamp
-    if (untilTimestamp > 0) {
+    if (untilTimestamp > 0 && res.posts && res.posts.length > 0) {
       const oldestInBatch = Math.min(...res.posts.map((p) => p.publishedAt || Date.now()));
       if (oldestInBatch <= untilTimestamp) {
         break;
