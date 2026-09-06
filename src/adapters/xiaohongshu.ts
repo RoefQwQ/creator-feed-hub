@@ -1,6 +1,7 @@
 import type { Channel, Post } from '../types';
 import type { PlatformAdapter, FetchResult, FetchOptions } from './types';
 import { bgFetch } from '../utils/http';
+import { toSecureMediaUrl } from '../utils/media';
 
 export const xiaohongshuAdapter: PlatformAdapter = {
   platform: 'xiaohongshu',
@@ -63,7 +64,8 @@ export const xiaohongshuAdapter: PlatformAdapter = {
       const sampleUser = rawNotes.find(n => (n.noteCard?.user || n.user)?.nickname)?.noteCard?.user ||
                          rawNotes.find(n => (n.noteCard?.user || n.user)?.nickname)?.user;
       const authorName = basicInfo.nickname || basicInfo.name || sampleUser?.nickname || channel.displayName || `小红书用户_${userId.slice(0, 6)}`;
-      const authorAvatar = basicInfo.imageb || basicInfo.images || sampleUser?.avatar || sampleUser?.avatarUrl || channel.avatarUrl;
+      const rawAvatar = basicInfo.imageb || basicInfo.images || sampleUser?.avatar || sampleUser?.avatarUrl || channel.avatarUrl;
+      const authorAvatar = toSecureMediaUrl(rawAvatar);
 
       const allPosts: Post[] = [];
       const seenIds = new Set<string>();
@@ -89,20 +91,22 @@ export const xiaohongshuAdapter: PlatformAdapter = {
           for (const img of imageList) {
             const imgUrl = img?.urlDefault || img?.urlPre || img?.url || img?.infoList?.[0]?.url;
             if (imgUrl) {
+              const secureUrl = toSecureMediaUrl(imgUrl);
               mediaList.push({
                 type: 'image',
-                previewUrl: imgUrl,
-                originalUrl: imgUrl,
+                previewUrl: secureUrl,
+                originalUrl: secureUrl,
               });
             }
           }
         }
 
         if (mediaList.length === 0 && coverUrl) {
+          const secureCover = toSecureMediaUrl(coverUrl);
           mediaList.push({
             type: isVideo ? 'video' : 'image',
-            previewUrl: coverUrl,
-            originalUrl: isVideo ? noteUrl : coverUrl,
+            previewUrl: secureCover,
+            originalUrl: isVideo ? noteUrl : secureCover,
           });
         }
 

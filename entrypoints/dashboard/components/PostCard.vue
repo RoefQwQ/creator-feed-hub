@@ -31,9 +31,19 @@ const secure = toSecureMediaUrl;
 async function handleMediaError(e: Event, originalUrl?: string) {
   const target = e.target as HTMLImageElement;
   if (!target || !originalUrl) return;
-  if (target.dataset.proxied) return; // Prevent infinite error loop
-  target.dataset.proxied = 'true';
 
+  const retryCount = Number(target.dataset.retryCount || 0);
+  if (retryCount >= 2) return; // Prevent infinite loop
+  target.dataset.retryCount = String(retryCount + 1);
+
+  // 1. Try permanent direct CDN URL first
+  const secureUrl = toSecureMediaUrl(originalUrl);
+  if (secureUrl && target.src !== secureUrl) {
+    target.src = secureUrl;
+    return;
+  }
+
+  // 2. Fallback: try proxyImage through background service worker
   try {
     const proxiedDataUrl = await proxyImage(originalUrl);
     if (proxiedDataUrl) {

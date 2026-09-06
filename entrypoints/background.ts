@@ -1,6 +1,7 @@
 import { defineBackground } from 'wxt/utils/define-background';
 import { db, getSettings } from '../src/db';
 import { updateChannel } from '../src/adapters';
+import { toSecureMediaUrl } from '../src/utils/media';
 
 const AUTO_SYNC_ALARM = 'creator-feed-auto-sync';
 
@@ -185,16 +186,27 @@ async function updateUnreadBadge() {
             origin = 'https://www.bilibili.com';
           }
 
-          // Generate candidate URLs to try if first one returns 403/404 (e.g. Xiaohongshu CDN domain fallback)
-          const urlsToTry = [url];
+          // Generate candidate URLs to try if first one returns 403/404
+          const normalized = toSecureMediaUrl(url);
+          const urlsToTry: string[] = [normalized];
+          if (normalized !== url) {
+            urlsToTry.push(url);
+          }
           if (isXhs) {
-            if (url.includes('sns-webpic-qc.xhscdn.com')) {
-              urlsToTry.push(url.replace('sns-webpic-qc.xhscdn.com', 'sns-img-qc.xhscdn.com'));
-              urlsToTry.push(url.replace('sns-webpic-qc.xhscdn.com', 'sns-img-bd.xhscdn.com'));
-            } else if (url.includes('sns-img-qc.xhscdn.com')) {
-              urlsToTry.push(url.replace('sns-img-qc.xhscdn.com', 'sns-img-bd.xhscdn.com'));
-              urlsToTry.push(url.replace('sns-img-qc.xhscdn.com', 'sns-webpic-qc.xhscdn.com'));
-            }
+            try {
+              const u = new URL(url);
+              const lastSegment = u.pathname.substring(u.pathname.lastIndexOf('/') + 1);
+              const fileId = lastSegment.split('!')[0].split('?')[0];
+              if (fileId && fileId.length >= 10 && !/^\d{10,14}$/.test(fileId)) {
+                const qcUrl = `https://sns-img-qc.xhscdn.com/${fileId}`;
+                if (!urlsToTry.includes(qcUrl)) {
+                  urlsToTry.unshift(qcUrl);
+                }
+                urlsToTry.push(`https://ci.xiaohongshu.com/${fileId}`);
+                urlsToTry.push(`https://sns-img-bd.xhscdn.com/${fileId}`);
+                urlsToTry.push(`https://sns-img-hw.xhscdn.com/${fileId}`);
+              }
+            } catch {}
           }
 
           let res: Response | null = null;
