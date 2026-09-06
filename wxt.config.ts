@@ -37,6 +37,7 @@ export default defineConfig({
       '*://*.xiaohongshu.com/*',
       '*://*.xhslink.com/*',
       '*://*.xhscdn.com/*',
+      '*://*.xhscdn.net/*',
       '*://*.weibo.com/*',
       '*://*.weibo.cn/*',
       '*://*.sinaimg.cn/*',

@@ -83,7 +83,22 @@ export const xiaohongshuAdapter: PlatformAdapter = {
         const coverUrl = cover.urlDefault || cover.urlPre || cover.infoList?.[0]?.url || card.image?.url;
         const noteUrl = `https://www.xiaohongshu.com/explore/${noteId}`;
 
-        if (coverUrl) {
+        // Support multiple images if present in card (e.g. imageList, imagesList)
+        const imageList = card.imageList || card.imagesList || item.imageList || item.imagesList;
+        if (Array.isArray(imageList) && imageList.length > 0) {
+          for (const img of imageList) {
+            const imgUrl = img?.urlDefault || img?.urlPre || img?.url || img?.infoList?.[0]?.url;
+            if (imgUrl) {
+              mediaList.push({
+                type: 'image',
+                previewUrl: imgUrl,
+                originalUrl: imgUrl,
+              });
+            }
+          }
+        }
+
+        if (mediaList.length === 0 && coverUrl) {
           mediaList.push({
             type: isVideo ? 'video' : 'image',
             previewUrl: coverUrl,

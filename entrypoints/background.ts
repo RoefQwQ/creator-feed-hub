@@ -19,19 +19,33 @@ export default defineBackground(() => {
 
   chrome.alarms?.onAlarm.addListener(async (alarm) => {
     if (alarm.name !== AUTO_SYNC_ALARM) return;
+    const settings = await getSettings();
+    if (!settings.enableAutoSync) {
+      // Clear alarm if auto sync is disabled
+      await chrome.alarms.clear(AUTO_SYNC_ALARM);
+      return;
+    }
     await syncAllChannels();
     await updateUnreadBadge();
   });
 
 async function setupAutoSync() {
   if (!chrome.alarms) return;
-  await chrome.alarms.create(AUTO_SYNC_ALARM, { periodInMinutes: 30 });
+  const settings = await getSettings();
+  if (settings.enableAutoSync) {
+    await chrome.alarms.create(AUTO_SYNC_ALARM, { periodInMinutes: 30 });
+  } else {
+    await chrome.alarms.clear(AUTO_SYNC_ALARM);
+  }
   await updateUnreadBadge();
 }
 
 async function syncAllChannels() {
   try {
-    const [channels, settings] = await Promise.all([db.channels.toArray(), getSettings()]);
+    const settings = await getSettings();
+    if (!settings.enableAutoSync) return;
+
+    const channels = await db.channels.toArray();
     for (const channel of channels) {
       await updateChannel(channel, settings.itemsPerFetch, false, { onlyOriginal: settings.hideReposts });
     }
@@ -52,6 +66,12 @@ async function updateUnreadBadge() {
 
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+    if (message.type === 'UPDATE_AUTO_SYNC') {
+      setupAutoSync();
+      sendResponse({ success: true });
+      return false;
+    }
+
     if (message.type === 'OPEN_DASHBOARD') {
       chrome.tabs.create({
         url: chrome.runtime.getURL('/dashboard.html'),
@@ -140,6 +160,96 @@ async function updateUnreadBadge() {
         }
       })();
       return true; // Keep message channel open for async response
+    }
+
+    if (message.type === 'PROXY_IMAGE') {
+      (async () => {
+        try {
+          const url = (message.url as string || '').trim();
+          if (!url || !/^https?:\/\//i.test(url)) {
+            sendResponse({ ok: false, error: 'Invalid URL' });
+            return;
+          }
+
+          const isXhs = url.includes('xhscdn.com') || url.includes('xiaohongshu.com') || url.includes('xhscdn.net');
+          let referer = 'https://www.xiaohongshu.com/';
+          let origin = 'https://www.xiaohongshu.com';
+          if (url.includes('sinaimg.cn') || url.includes('weibo.com')) {
+            referer = 'https://weibo.com/';
+            origin = 'https://weibo.com';
+          } else if (url.includes('pximg.net') || url.includes('pixiv.net')) {
+            referer = 'https://www.pixiv.net/';
+            origin = 'https://www.pixiv.net';
+          } else if (url.includes('bilibili.com') || url.includes('hdslb.com')) {
+            referer = 'https://www.bilibili.com/';
+            origin = 'https://www.bilibili.com';
+          }
+
+          // Generate candidate URLs to try if first one returns 403/404 (e.g. Xiaohongshu CDN domain fallback)
+          const urlsToTry = [url];
+          if (isXhs) {
+            if (url.includes('sns-webpic-qc.xhscdn.com')) {
+              urlsToTry.push(url.replace('sns-webpic-qc.xhscdn.com', 'sns-img-qc.xhscdn.com'));
+              urlsToTry.push(url.replace('sns-webpic-qc.xhscdn.com', 'sns-img-bd.xhscdn.com'));
+            } else if (url.includes('sns-img-qc.xhscdn.com')) {
+              urlsToTry.push(url.replace('sns-img-qc.xhscdn.com', 'sns-img-bd.xhscdn.com'));
+              urlsToTry.push(url.replace('sns-img-qc.xhscdn.com', 'sns-webpic-qc.xhscdn.com'));
+            }
+          }
+
+          let res: Response | null = null;
+          let lastStatus = 0;
+
+          for (const targetUrl of urlsToTry) {
+            try {
+              const fetchOptions: RequestInit = {
+                method: 'GET',
+                headers: {
+                  Referer: referer,
+                  Origin: origin,
+                  Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+                  'Sec-Fetch-Dest': 'image',
+                  'Sec-Fetch-Mode': 'no-cors',
+                  'Sec-Fetch-Site': 'cross-site',
+                },
+                // Use 'include' so extension host permissions attach user's authenticated cookies (e.g. web_session, a1)
+                credentials: isXhs ? 'include' : 'omit',
+              };
+
+              const resp = await fetch(targetUrl, fetchOptions);
+              if (resp.ok) {
+                res = resp;
+                break;
+              }
+              lastStatus = resp.status;
+            } catch {
+              // Try next candidate
+            }
+          }
+
+          if (!res || !res.ok) {
+            sendResponse({ ok: false, status: lastStatus, error: `HTTP ${lastStatus || 403}` });
+            return;
+          }
+
+          const arrayBuffer = await res.arrayBuffer();
+          const mimeType = res.headers.get('content-type') || 'image/jpeg';
+          const bytes = new Uint8Array(arrayBuffer);
+          let binary = '';
+          const chunkSize = 8192;
+          for (let i = 0; i < bytes.length; i += chunkSize) {
+            binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize) as unknown as number[]);
+          }
+          const base64 = btoa(binary);
+          const dataUrl = `data:${mimeType};base64,${base64}`;
+
+          sendResponse({ ok: true, dataUrl });
+        } catch (err: any) {
+          console.error('[Background] PROXY_IMAGE error:', err);
+          sendResponse({ ok: false, error: err?.message || 'Proxy image error' });
+        }
+      })();
+      return true;
     }
 
     if (message.type === 'SYNC_RPLAY_TOKEN') {
@@ -699,6 +809,7 @@ async function setupDeclarativeNetRules() {
         },
         condition: {
           urlFilter: '*sinaimg.cn*',
+          resourceTypes: ['image', 'media', 'xmlhttprequest', 'sub_frame'] as any,
         },
       },
       // 2. Pixiv Pximg Hotlink Bypass: rewrite Referer to https://www.pixiv.net/
@@ -717,6 +828,7 @@ async function setupDeclarativeNetRules() {
         },
         condition: {
           urlFilter: '*pximg.net*',
+          resourceTypes: ['image', 'media', 'xmlhttprequest', 'sub_frame'] as any,
         },
       },
       // 3. Upgrade http to https for sinaimg
@@ -728,12 +840,85 @@ async function setupDeclarativeNetRules() {
         },
         condition: {
           urlFilter: 'http://*.sinaimg.cn/*',
+          resourceTypes: ['image', 'media', 'xmlhttprequest', 'sub_frame'] as any,
+        },
+      },
+      // 4. Xiaohongshu xhscdn.com Hotlink Bypass: rewrite Referer & Origin to https://www.xiaohongshu.com/
+      {
+        id: 1004,
+        priority: 1,
+        action: {
+          type: 'modifyHeaders' as any,
+          requestHeaders: [
+            {
+              header: 'Referer',
+              operation: 'set' as any,
+              value: 'https://www.xiaohongshu.com/',
+            },
+            {
+              header: 'Origin',
+              operation: 'set' as any,
+              value: 'https://www.xiaohongshu.com',
+            },
+          ],
+        },
+        condition: {
+          urlFilter: '*xhscdn.com*',
+          resourceTypes: ['image', 'media', 'xmlhttprequest', 'sub_frame'] as any,
+        },
+      },
+      // 5. Xiaohongshu image subdomains Hotlink Bypass
+      {
+        id: 1005,
+        priority: 1,
+        action: {
+          type: 'modifyHeaders' as any,
+          requestHeaders: [
+            {
+              header: 'Referer',
+              operation: 'set' as any,
+              value: 'https://www.xiaohongshu.com/',
+            },
+            {
+              header: 'Origin',
+              operation: 'set' as any,
+              value: 'https://www.xiaohongshu.com',
+            },
+          ],
+        },
+        condition: {
+          urlFilter: '*xiaohongshu.com*',
+          resourceTypes: ['image', 'media', 'xmlhttprequest', 'sub_frame'] as any,
+        },
+      },
+      // 6. Xiaohongshu xhscdn.net Hotlink Bypass
+      {
+        id: 1006,
+        priority: 1,
+        action: {
+          type: 'modifyHeaders' as any,
+          requestHeaders: [
+            {
+              header: 'Referer',
+              operation: 'set' as any,
+              value: 'https://www.xiaohongshu.com/',
+            },
+            {
+              header: 'Origin',
+              operation: 'set' as any,
+              value: 'https://www.xiaohongshu.com',
+            },
+          ],
+        },
+        condition: {
+          urlFilter: '*xhscdn.net*',
+          resourceTypes: ['image', 'media', 'xmlhttprequest', 'sub_frame'] as any,
         },
       },
     ];
 
     await chrome.declarativeNetRequest.updateDynamicRules({
-      removeRuleIds: [1001, 1002, 1003],
+      removeRuleIds: [1001, 1002, 1003, 1004, 1005, 1006],
       addRules: rules,
     });
     console.log('[Creator Feed Hub] declarativeNetRequest rules initialized');

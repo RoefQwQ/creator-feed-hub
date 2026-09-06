@@ -207,6 +207,19 @@ export interface AppSettings {
   requestDelayMs: number;
   enableR18Blur: boolean;
   autoOpenOriginalUrl: boolean;
+  enableAutoSync?: boolean; // 是否启用后台定时自动同步（默认关闭，完全依靠手动更新）
   hideReposts?: boolean; // 默认是否隐藏转发/转自动态
   hideTextOnly?: boolean; // 是否过滤纯文字博文/仅看图文多媒体
 }
+
+export interface DeletedPostRecord {
+  id: string; // 唯一动态内联ID，如 "xiaohongshu_66d01..." 或 "bilibili_123456"
+  channelId?: string;
+  creatorId?: string;
+  platform?: Platform;
+  title?: string;
+  deletedAt: number;
+  postData?: Post; // 完整动态快照，用于回收站定向找回与无缝还原
+}
+
+

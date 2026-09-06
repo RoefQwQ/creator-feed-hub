@@ -1,11 +1,12 @@
 import Dexie, { type Table } from 'dexie';
-import type { Creator, Channel, Post, AppSettings } from '../types';
+import type { Creator, Channel, Post, AppSettings, DeletedPostRecord } from '../types';
 
 export class FeedDatabase extends Dexie {
   creators!: Table<Creator, string>;
   channels!: Table<Channel, string>;
   posts!: Table<Post, string>;
   settings!: Table<{ key: string; value: any }, string>;
+  deletedPostIds!: Table<DeletedPostRecord, string>;
 
   constructor() {
     super('CreatorFeedHubDB');
@@ -19,6 +20,10 @@ export class FeedDatabase extends Dexie {
     this.version(2).stores({
       posts: 'id, creatorId, channelId, platform, publishedAt, fetchedAt, isRead, isBookmarked, [channelId+publishedAt]',
     });
+    // Version 3: Add deletedPostIds store to record tombstoned post IDs
+    this.version(3).stores({
+      deletedPostIds: 'id, channelId, creatorId, deletedAt',
+    });
   }
 }
 
@@ -31,6 +36,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   requestDelayMs: 600,
   enableR18Blur: true,
   autoOpenOriginalUrl: false,
+  enableAutoSync: false, // 默认关闭后台自动更新，完全依靠手动更新
   hideReposts: false,
 };
 
@@ -98,4 +104,153 @@ export async function cleanupOldPosts(days: number = 60): Promise<number> {
   }
 
   return postsToDelete.length;
+}
+
+/**
+ * Mark a post as deleted by removing it from `posts` and storing in `deletedPostIds` (Recycle Bin)
+ * with a full post snapshot so it can be restored directly at any time.
+ */
+export async function deletePostAndTombstone(post: Post): Promise<void> {
+  await db.posts.delete(post.id);
+  await db.deletedPostIds.put({
+    id: post.id,
+    channelId: post.channelId,
+    creatorId: post.creatorId,
+    platform: post.platform,
+    title: post.title || (post.content ? post.content.slice(0, 50) : post.id),
+    deletedAt: Date.now(),
+    postData: JSON.parse(JSON.stringify(post)),
+  });
+}
+
+/**
+ * Restore a single deleted post directly back to `posts` table from Recycle Bin.
+ * Returns the restored Post if it was restored, or null if no postData existed.
+ */
+export async function restoreDeletedPost(id: string): Promise<Post | null> {
+  const record = await db.deletedPostIds.get(id);
+  if (!record) return null;
+  if (record.postData) {
+    await db.posts.put(record.postData);
+  }
+  await db.deletedPostIds.delete(id);
+  return record.postData || null;
+}
+
+/**
+ * Restore a single deleted post id so it can be re-fetched via network sync.
+ */
+export async function restoreDeletedPostId(id: string): Promise<void> {
+  await restoreDeletedPost(id);
+}
+
+/**
+ * Restore multiple deleted posts directly back into `posts` table.
+ */
+export async function restoreDeletedPostIds(ids: string[]): Promise<Post[]> {
+  const records = await db.deletedPostIds.where('id').anyOf(ids).toArray();
+  const restored: Post[] = [];
+  for (const r of records) {
+    if (r.postData) {
+      restored.push(r.postData);
+    }
+  }
+  if (restored.length > 0) {
+    await db.posts.bulkPut(restored);
+  }
+  await db.deletedPostIds.bulkDelete(ids);
+  return restored;
+}
+
+/**
+ * Clear all deleted post tombstone records and restore all snapshot posts back to feed.
+ */
+export async function restoreAllDeletedPostIds(): Promise<number> {
+  const records = await db.deletedPostIds.toArray();
+  const restored: Post[] = [];
+  for (const r of records) {
+    if (r.postData) {
+      restored.push(r.postData);
+    }
+  }
+  if (restored.length > 0) {
+    await db.posts.bulkPut(restored);
+  }
+  await db.deletedPostIds.clear();
+  return records.length;
+}
+
+/**
+ * Permanently purge a deleted post record from Recycle Bin without restoring it.
+ */
+export async function permanentlyDeletePost(id: string): Promise<void> {
+  await db.deletedPostIds.delete(id);
+}
+
+/**
+ * Get count of tombstoned deleted posts in Recycle Bin.
+ */
+export async function getDeletedPostCount(): Promise<number> {
+  try {
+    return await db.deletedPostIds.count();
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Get all tombstoned deleted post records in Recycle Bin, sorted newest first.
+ */
+export async function getDeletedPostRecords(): Promise<DeletedPostRecord[]> {
+  try {
+    return await db.deletedPostIds.orderBy('deletedAt').reverse().toArray();
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Heal broken or stale image URLs in local IndexedDB posts (e.g. Xiaohongshu strict CDN domains).
+ * Returns the count of healed posts.
+ */
+export async function healBrokenPostMedia(): Promise<number> {
+  let healedCount = 0;
+  const xhsPosts = await db.posts.where('platform').equals('xiaohongshu').toArray();
+
+  for (const post of xhsPosts) {
+    let modified = false;
+    if (post.mediaList && post.mediaList.length > 0) {
+      for (const media of post.mediaList) {
+        if (media.previewUrl && (media.previewUrl.includes('sns-webpic-qc.xhscdn.com') || media.previewUrl.includes('sns-webpic.xhscdn.com'))) {
+          media.previewUrl = media.previewUrl.replace(/sns-webpic(-qc)?\.xhscdn\.com/g, 'sns-img-qc.xhscdn.com');
+          modified = true;
+        }
+        if (media.originalUrl && (media.originalUrl.includes('sns-webpic-qc.xhscdn.com') || media.originalUrl.includes('sns-webpic.xhscdn.com'))) {
+          media.originalUrl = media.originalUrl.replace(/sns-webpic(-qc)?\.xhscdn\.com/g, 'sns-img-qc.xhscdn.com');
+          modified = true;
+        }
+      }
+    }
+
+    if (post.authorMeta?.avatar && post.authorMeta.avatar.includes('sns-webpic-qc.xhscdn.com')) {
+      post.authorMeta.avatar = post.authorMeta.avatar.replace('sns-webpic-qc.xhscdn.com', 'sns-img-qc.xhscdn.com');
+      modified = true;
+    }
+
+    if (modified) {
+      await db.posts.put(post);
+      healedCount++;
+    }
+  }
+
+  // Also check channels avatarUrl
+  const xhsChannels = await db.channels.where('platform').equals('xiaohongshu').toArray();
+  for (const ch of xhsChannels) {
+    if (ch.avatarUrl && ch.avatarUrl.includes('sns-webpic-qc.xhscdn.com')) {
+      const fixed = ch.avatarUrl.replace('sns-webpic-qc.xhscdn.com', 'sns-img-qc.xhscdn.com');
+      await db.channels.update(ch.id, { avatarUrl: fixed });
+    }
+  }
+
+  return healedCount;
 }

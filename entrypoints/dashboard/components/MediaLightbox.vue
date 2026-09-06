@@ -1,10 +1,22 @@
 <script setup lang="ts">
 import { ExternalLink, X } from 'lucide-vue-next';
-import { toSecureMediaUrl } from '../../../src/utils/media';
+import { toSecureMediaUrl, proxyImage } from '../../../src/utils/media';
 
 defineProps<{ media: { url: string; originalUrl?: string; type: string; title?: string } }>();
 const emit = defineEmits<{ close: [] }>();
 const secure = toSecureMediaUrl;
+
+async function handleImgError(e: Event, originalUrl?: string) {
+  const target = e.target as HTMLImageElement;
+  if (!target || !originalUrl) return;
+  if (target.dataset.proxied) return;
+  target.dataset.proxied = 'true';
+
+  const proxiedDataUrl = await proxyImage(originalUrl);
+  if (proxiedDataUrl) {
+    target.src = proxiedDataUrl;
+  }
+}
 </script>
 <template>
   <div class="fixed inset-0 z-50 bg-black/92 backdrop-blur-md flex flex-col justify-between p-4 sm:p-6" @click.self="emit('close')">
@@ -18,7 +30,7 @@ const secure = toSecureMediaUrl;
       </div>
     </div>
     <div class="flex-1 flex items-center justify-center p-2 min-h-0" @click="emit('close')">
-      <img :src="secure(media.url)" referrerpolicy="no-referrer" class="max-w-full max-h-[82vh] object-contain rounded-xl shadow-2xl transition-all select-none" @click.stop />
+      <img :src="secure(media.url)" class="max-w-full max-h-[82vh] object-contain rounded-xl shadow-2xl transition-all select-none" @error="handleImgError($event, media.url)" @click.stop />
     </div>
     <div class="text-center text-[11px] text-white/40">点击遮罩或按 ESC 键即可退出大图模式</div>
   </div>

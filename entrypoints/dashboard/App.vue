@@ -1,20 +1,37 @@
 <script setup lang="ts">
 import { ref, shallowRef, onMounted, onUnmounted, computed, watch, nextTick } from 'vue';
-import { db, getSettings, saveSettings, getDatabaseStats, cleanupOldPosts } from '../../src/db';
+import {
+  db,
+  getSettings,
+  saveSettings,
+  getDatabaseStats,
+  cleanupOldPosts,
+  deletePostAndTombstone,
+  restoreDeletedPost,
+  restoreDeletedPostId,
+  restoreDeletedPostIds,
+  restoreAllDeletedPostIds,
+  permanentlyDeletePost,
+  getDeletedPostCount,
+  getDeletedPostRecords,
+  healBrokenPostMedia
+} from '../../src/db';
 import {
   PLATFORM_REGISTRY,
   type Platform,
   type Creator,
   type Channel,
   type Post,
-  type AppSettings
+  type AppSettings,
+  type DeletedPostRecord
 } from '../../src/types';
 import {
   updateChannel,
   updateCreator,
   clearStaleUpdatingStatus,
   fetchChannelHistory,
-  deepSyncChannel
+  deepSyncChannel,
+  batchUpdateChannelsInterleaved
 } from '../../src/adapters';
 import { parseProfileUrl } from '../../src/utils/urlParser';
 import { toSecureMediaUrl } from '../../src/utils/media';
@@ -63,7 +80,9 @@ import {
   Play,
   StopCircle,
   Edit3,
-  ImageOff
+  ImageOff,
+  Camera,
+  RotateCcw
 } from 'lucide-vue-next';
 import PostCard from './components/PostCard.vue';
 import MediaLightbox from './components/MediaLightbox.vue';
@@ -105,6 +124,25 @@ const excludeTags = ref<Set<string>>(new Set());
 const isRefreshingAll = ref(false);
 const refreshProgress = ref({ current: 0, total: 0 });
 const isDarkMode = ref(false);
+
+// Deleted posts (tombstones) state & Sync dropdown
+const deletedPostCount = ref(0);
+const deletedPostsList = ref<DeletedPostRecord[]>([]);
+const showDeletedPostsModal = ref(false);
+const deletedPostsSearchQuery = ref('');
+const showSyncMenu = ref(false);
+
+const filteredDeletedPostsList = computed(() => {
+  const q = deletedPostsSearchQuery.value.trim().toLowerCase();
+  if (!q) return deletedPostsList.value;
+  return deletedPostsList.value.filter(item => {
+    return (
+      (item.title && item.title.toLowerCase().includes(q)) ||
+      (item.id && item.id.toLowerCase().includes(q)) ||
+      (item.platform && item.platform.toLowerCase().includes(q))
+    );
+  });
+});
 
 // Bookmarks view controls
 const bookmarkSearchQuery = ref('');
@@ -252,8 +290,8 @@ function toggleExpandCreator(creatorId: string) {
   expandedCreatorIds.value = new Set(expandedCreatorIds.value);
 }
 
-// Pagination & Infinite Scroll to keep DOM lightweight
-const PAGE_SIZE = 18;
+// Pagination & Infinite Scroll to keep DOM lightweight while pre-rendering smoothly
+const PAGE_SIZE = 36;
 const visibleCount = ref(PAGE_SIZE);
 const infiniteScrollTrigger = ref<HTMLElement | null>(null);
 let scrollObserver: IntersectionObserver | null = null;
@@ -275,7 +313,7 @@ function setupScrollObserver() {
         }
       }
     },
-    { rootMargin: '350px' }
+    { rootMargin: '900px 0px' }
   );
 
   if (infiniteScrollTrigger.value) {
@@ -318,6 +356,13 @@ const platformLoginStatus = ref<Record<string, boolean>>({});
 const currentRplayToken = ref<string>('');
 const hideReposts = ref(false);
 const hideTextOnly = ref(false);
+
+watch(activeTab, async (newTab) => {
+  if (newTab === 'settings') {
+    deletedPostsList.value = await getDeletedPostRecords();
+    await refreshDeletedCount();
+  }
+});
 
 onMounted(async () => {
   // Clear any hanging updating status from previous reloads/crashes so icons don't spin perpetually
@@ -373,6 +418,11 @@ function handleKeydown(e: KeyboardEvent) {
 }
 
 async function reloadData() {
+  try {
+    // Auto-heal broken CDN image URLs for Xiaohongshu and other platforms in local IndexedDB
+    await healBrokenPostMedia();
+  } catch {}
+
   creators.value = await db.creators.toArray();
   channels.value = await db.channels.toArray();
   posts.value = await db.posts.orderBy('publishedAt').reverse().toArray();
@@ -380,6 +430,97 @@ async function reloadData() {
   try {
     dbStats.value = await getDatabaseStats();
   } catch {}
+  await refreshDeletedCount();
+  deletedPostsList.value = await getDeletedPostRecords();
+}
+
+const isHealingMedia = ref(false);
+async function handleHealBrokenMedia() {
+  if (isHealingMedia.value) return;
+  isHealingMedia.value = true;
+  try {
+    const healed = await healBrokenPostMedia();
+    await reloadData();
+    if (healed > 0) {
+      alert(`【小红书图裂修复完成】成功修复并重写了本地数据库中 ${healed} 条动态的媒体链接！`);
+    } else {
+      alert(`【检测完成】本地所有小红书动态与图片的 CDN 地址均已为最新兼容格式。`);
+    }
+  } catch (err: any) {
+    alert('修复异常: ' + (err?.message || err));
+  } finally {
+    isHealingMedia.value = false;
+  }
+}
+
+async function refreshDeletedCount() {
+  try {
+    deletedPostCount.value = await getDeletedPostCount();
+  } catch {
+    deletedPostCount.value = 0;
+  }
+}
+
+async function handleDeletePost(post: Post) {
+  const snippet = post.title || (post.content ? post.content.slice(0, 35) : '该动态');
+  if (!confirm(`确定要删除此条动态吗？\n\n“${snippet}”\n\n提示：该动态ID将记录到本地数据库黑名单中。后续点击“同步全部”默认不会重新拉取此动态；您可在设置或同步选项中随时查看与恢复。`)) {
+    return;
+  }
+  await deletePostAndTombstone(post);
+  posts.value = posts.value.filter(p => p.id !== post.id);
+  await refreshDeletedCount();
+}
+
+async function openDeletedPostsModal() {
+  deletedPostsList.value = await getDeletedPostRecords();
+  await refreshDeletedCount();
+  deletedPostsSearchQuery.value = '';
+  showDeletedPostsModal.value = true;
+}
+
+async function handleRestoreSingleDeleted(record: DeletedPostRecord) {
+  const restoredPost = await restoreDeletedPost(record.id);
+  deletedPostsList.value = deletedPostsList.value.filter(r => r.id !== record.id);
+  await reloadData();
+  await refreshDeletedCount();
+  if (restoredPost) {
+    alert(`【动态已定向找回】\n已将动态“${restoredPost.title || '该作品'}”直接还原到动态列表中！`);
+  } else {
+    const ch = channels.value.find(c => c.id === record.channelId);
+    if (ch) {
+      await updateChannel(ch, settings.value.itemsPerFetch, true, { restoreDeleted: true });
+      await reloadData();
+    }
+    alert(`【动态已定向找回】已解除过滤并重新拉取该动态！`);
+  }
+}
+
+async function handleRestoreAllAndSync() {
+  if (deletedPostCount.value === 0) return;
+  if (!confirm(`确定要将回收站中全部 ${deletedPostCount.value} 条已删除动态定向找回并还原到动态列表中吗？`)) return;
+  await restoreAllDeletedPostIds();
+  await reloadData();
+  await refreshDeletedCount();
+  deletedPostsList.value = [];
+  showDeletedPostsModal.value = false;
+  await handleRefreshAll(true);
+  alert(`【全部找回完成】回收站动态已全部恢复并还原至动态流！`);
+}
+
+async function handlePermanentlyDelete(record: DeletedPostRecord) {
+  if (!confirm(`确定要从回收站彻底删除该记录吗？彻底删除后将无法在此定向找回。`)) return;
+  await permanentlyDeletePost(record.id);
+  deletedPostsList.value = deletedPostsList.value.filter(r => r.id !== record.id);
+  await refreshDeletedCount();
+}
+
+async function handleEmptyRecycleBin() {
+  if (deletedPostCount.value === 0) return;
+  if (!confirm(`确定要彻底清空回收站中全部 ${deletedPostCount.value} 条记录吗？清空后将无法在此定向找回。`)) return;
+  await db.deletedPostIds.clear();
+  deletedPostsList.value = [];
+  await refreshDeletedCount();
+  alert('回收站已彻底清空。');
 }
 
 const isCleaningStorage = ref(false);
@@ -647,7 +788,7 @@ function loadMore() {
   visibleCount.value += PAGE_SIZE;
 }
 
-// ===== Masonry Waterfall Layout: Responsive Column Distribution =====
+// ===== Masonry Waterfall Layout: Height-Balanced Column Distribution =====
 const windowWidth = ref(typeof window !== 'undefined' ? window.innerWidth : 1200);
 const columnCount = computed(() => {
   if (windowWidth.value < 768) return 1;   // mobile: single column
@@ -659,39 +800,91 @@ function handleResizeForWaterfall() {
   windowWidth.value = window.innerWidth;
 }
 
-// Distribute posts round-robin into columns for Feed waterfall
+/**
+ * Estimate the card render height in virtual units based on title, content length, and media count.
+ * This guarantees that tall posts (like long single-image photo shoots) don't create deep voids in adjacent columns.
+ */
+function estimatePostHeight(p: Post): number {
+  let h = 90; // Header avatar + meta info + padding
+  if (p.title) h += 28;
+  if (p.content) {
+    const lines = Math.min(Math.ceil(p.content.length / 32), 4);
+    h += lines * 18;
+  }
+  if (p.mediaList?.length) {
+    if (p.mediaList.length === 1) {
+      h += p.mediaList[0].type === 'video' ? 210 : 320;
+    } else if (p.mediaList.length === 2) {
+      h += 220;
+    } else {
+      h += 260;
+    }
+  }
+  h += 40; // Footer timestamp + direct link bar
+  return h;
+}
+
+// Distribute posts into columns using greedy shortest-column balancing for Feed waterfall
 const feedColumns = computed(() => {
-  const cols: Post[][] = Array.from({ length: columnCount.value }, () => []);
-  paginatedPosts.value.forEach((post, idx) => {
-    cols[idx % columnCount.value].push(post);
+  const count = columnCount.value;
+  const cols: Post[][] = Array.from({ length: count }, () => []);
+  const colHeights = new Array(count).fill(0);
+
+  paginatedPosts.value.forEach((post) => {
+    // Find the current shortest column
+    let minCol = 0;
+    for (let c = 1; c < count; c++) {
+      if (colHeights[c] < colHeights[minCol]) {
+        minCol = c;
+      }
+    }
+    cols[minCol].push(post);
+    colHeights[minCol] += estimatePostHeight(post) + 20; // 20px gap
   });
+
   return cols;
 });
 
-// Distribute posts round-robin into columns for Bookmarks waterfall
+// Distribute posts into columns using greedy shortest-column balancing for Bookmarks waterfall
 const bookmarkColumns = computed(() => {
-  const cols: Post[][] = Array.from({ length: columnCount.value }, () => []);
-  filteredBookmarkedPosts.value.forEach((post, idx) => {
-    cols[idx % columnCount.value].push(post);
+  const count = columnCount.value;
+  const cols: Post[][] = Array.from({ length: count }, () => []);
+  const colHeights = new Array(count).fill(0);
+
+  filteredBookmarkedPosts.value.forEach((post) => {
+    let minCol = 0;
+    for (let c = 1; c < count; c++) {
+      if (colHeights[c] < colHeights[minCol]) {
+        minCol = c;
+      }
+    }
+    cols[minCol].push(post);
+    colHeights[minCol] += estimatePostHeight(post) + 20;
   });
+
   return cols;
 });
 
-// Refresh all channels
-async function handleRefreshAll() {
+// Refresh all channels using multi-round interleaved round-robin pacing across platforms
+async function handleRefreshAll(restoreDeleted: boolean = false) {
   if (isRefreshingAll.value || channels.value.length === 0) return;
   isRefreshingAll.value = true;
   refreshProgress.value = { current: 0, total: channels.value.length };
 
   try {
-    for (let i = 0; i < channels.value.length; i++) {
-      const ch = channels.value[i];
-      refreshProgress.value.current = i + 1;
-      await updateChannel(ch, settings.value.itemsPerFetch, true, { onlyOriginal: hideReposts.value });
-      // Safe paced delay between requests (at least 800ms) to prevent triggering 429
-      const delay = Math.max(settings.value.requestDelayMs || 600, 800);
-      await new Promise(r => setTimeout(r, delay));
-    }
+    const minDelay = Math.max(settings.value.requestDelayMs || 600, 800);
+    await batchUpdateChannelsInterleaved(
+      channels.value,
+      settings.value.itemsPerFetch,
+      {
+        onlyOriginal: hideReposts.value,
+        minPlatformIntervalMs: minDelay,
+        restoreDeleted,
+        onProgress: (current, total) => {
+          refreshProgress.value = { current, total };
+        },
+      }
+    );
     await reloadData();
   } catch (err) {
     console.error('Refresh all error', err);
@@ -722,19 +915,22 @@ async function handleRefreshCreator(creatorId: string) {
   }
 }
 
-// Refresh single channel
-async function handleRefreshChannel(channel: Channel) {
-  // Prevent rapid spam-clicks (8s cooldown check)
-  if (channel.lastCheckAt && Date.now() - channel.lastCheckAt < 8_000) {
+// Refresh single channel (with optional forceRefresh to update existing posts)
+async function handleRefreshChannel(channel: Channel, forceRefresh: boolean = false) {
+  // Prevent rapid spam-clicks (8s cooldown check unless forceRefresh)
+  if (!forceRefresh && channel.lastCheckAt && Date.now() - channel.lastCheckAt < 8_000) {
     alert('【操作过于频繁】该账号在 8 秒内刚执行过同步。为保护账号免受平台限流，请稍等片刻后再试。');
     return;
   }
-  const res = await updateChannel(channel, settings.value.itemsPerFetch, true, { onlyOriginal: hideReposts.value });
+  const res = await updateChannel(channel, settings.value.itemsPerFetch, true, {
+    onlyOriginal: hideReposts.value,
+    forceRefresh,
+  });
   await reloadData();
   if (res.error) {
     alert(`【同步未成功】${channel.displayName || channel.accountId}：\n${res.error}`);
   } else if (res.posts && res.posts.length > 0) {
-    alert(`【同步成功】已获取到 ${channel.displayName || channel.accountId} 的 ${res.posts.length} 条最新作品/动态！`);
+    alert(`【同步成功】已获取并更新 ${channel.displayName || channel.accountId} 的 ${res.posts.length} 条作品/动态！`);
   } else {
     alert(`【同步完成】连接平台成功，但 ${channel.displayName || channel.accountId} 近期暂无公开发布的内容。`);
   }
@@ -1680,15 +1876,73 @@ function formatTime(timestamp: number) {
 
         <!-- Right Action Buttons -->
         <div class="flex items-center gap-2">
-          <!-- Refresh All Button -->
-          <button
-            @click="handleRefreshAll"
-            :disabled="isRefreshingAll || channels.length === 0"
-            class="flex items-center gap-2 px-3.5 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 rounded-xl shadow-xs transition-all cursor-pointer"
-          >
-            <RefreshCw class="w-4 h-4" :class="{ 'animate-spin': isRefreshingAll }" />
-            <span>{{ isRefreshingAll ? `同步中 ${refreshProgress.current}/${refreshProgress.total}` : '同步全部' }}</span>
-          </button>
+          <!-- Refresh All Button Group -->
+          <div class="relative flex items-center">
+            <button
+              type="button"
+              @click="handleRefreshAll(false)"
+              :disabled="isRefreshingAll || channels.length === 0"
+              class="flex items-center gap-2 px-3.5 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 transition-all cursor-pointer shadow-xs"
+              :class="deletedPostCount > 0 ? 'rounded-l-xl border-r border-indigo-500/80' : 'rounded-xl'"
+              title="一键同步最新动态（默认跳过已删除的动态）"
+            >
+              <RefreshCw class="w-4 h-4" :class="{ 'animate-spin': isRefreshingAll }" />
+              <span>{{ isRefreshingAll ? `同步中 ${refreshProgress.current}/${refreshProgress.total}` : '同步全部' }}</span>
+            </button>
+            <div v-if="deletedPostCount > 0" class="relative">
+              <button
+                type="button"
+                @click="showSyncMenu = !showSyncMenu"
+                :disabled="isRefreshingAll"
+                class="px-2 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-r-xl shadow-xs cursor-pointer transition-colors flex items-center"
+                title="同步选项与已删除动态管理"
+              >
+                <ChevronDown class="w-3.5 h-3.5 transition-transform" :class="{ 'rotate-180': showSyncMenu }" />
+              </button>
+              <!-- Sync Menu Dropdown -->
+              <div
+                v-if="showSyncMenu"
+                class="fixed inset-0 z-40"
+                @click="showSyncMenu = false"
+              ></div>
+              <div
+                v-if="showSyncMenu"
+                class="absolute right-0 top-full mt-1.5 w-64 bg-white dark:bg-slate-900 rounded-2xl shadow-xl border border-slate-200 dark:border-slate-800 p-1.5 z-50 text-xs space-y-1"
+              >
+                <button
+                  type="button"
+                  @click="showSyncMenu = false; handleRefreshAll(false)"
+                  class="w-full text-left px-3 py-2.5 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 flex items-center justify-between transition-colors cursor-pointer"
+                >
+                  <div class="flex items-center gap-2">
+                    <RefreshCw class="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                    <span class="font-semibold text-slate-800 dark:text-slate-200">一键同步全部 (常规)</span>
+                  </div>
+                  <span class="text-[10px] text-slate-400">跳过已删除</span>
+                </button>
+                <button
+                  type="button"
+                  @click="showSyncMenu = false; handleRefreshAll(true)"
+                  class="w-full text-left px-3 py-2.5 rounded-xl hover:bg-indigo-50 dark:hover:bg-indigo-950/50 text-indigo-600 dark:text-indigo-400 flex items-center justify-between transition-colors cursor-pointer"
+                >
+                  <div class="flex items-center gap-2">
+                    <RotateCcw class="w-3.5 h-3.5" />
+                    <span class="font-semibold">同步并恢复已删除动态</span>
+                  </div>
+                  <span class="px-1.5 py-0.5 rounded text-[10px] bg-indigo-100 dark:bg-indigo-900/60 font-bold">{{ deletedPostCount }}</span>
+                </button>
+                <div class="h-px bg-slate-100 dark:bg-slate-800 my-1"></div>
+                <button
+                  type="button"
+                  @click="showSyncMenu = false; openDeletedPostsModal()"
+                  class="w-full text-left px-3 py-2 rounded-xl hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-600 dark:text-slate-400 flex items-center gap-2 transition-colors cursor-pointer"
+                >
+                  <Trash2 class="w-3.5 h-3.5 text-slate-400" />
+                  <span>管理已删除动态记录 ({{ deletedPostCount }})...</span>
+                </button>
+              </div>
+            </div>
+          </div>
 
           <!-- Add Creator Button -->
           <button
@@ -1726,7 +1980,7 @@ function formatTime(timestamp: number) {
               <input
                 v-model="searchQuery"
                 type="text"
-                placeholder="搜索动态内容或博主..."
+                placeholder="搜索内容或创作者..."
                 class="w-full pl-8 pr-3 py-1.5 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs outline-none focus:ring-1 focus:ring-indigo-500 text-slate-800 dark:text-slate-200 placeholder-slate-400"
               />
             </div>
@@ -1735,8 +1989,8 @@ function formatTime(timestamp: number) {
           <!-- Platform Navigation Menu -->
           <div class="p-3 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200/80 dark:border-slate-800 shadow-2xs space-y-1">
             <div class="text-[11px] font-bold text-slate-400 uppercase tracking-wider px-2 py-1 flex items-center justify-between">
-              <span>平台分类</span>
-              <span class="text-[10px] font-mono font-normal">{{ Object.keys(PLATFORM_REGISTRY).length }} 个渠道</span>
+              <span>平台</span>
+              <span class="text-[10px] font-mono font-normal">{{ Object.keys(PLATFORM_REGISTRY).length }} 个平台</span>
             </div>
 
             <!-- All Platforms Button -->
@@ -1747,7 +2001,7 @@ function formatTime(timestamp: number) {
             >
               <div class="flex items-center gap-2">
                 <LayoutGrid class="w-4 h-4" />
-                <span>全部平台</span>
+                <span>全部</span>
               </div>
               <span class="text-[10px] px-1.5 py-0.2 rounded-full font-mono bg-slate-200/70 dark:bg-slate-700 text-slate-600 dark:text-slate-300">
                 {{ platformPostCounts['all'] || 0 }}
@@ -1780,7 +2034,7 @@ function formatTime(timestamp: number) {
             <!-- Content Preferences Buttons -->
             <div class="space-y-1.5">
               <div class="text-[11px] font-bold text-slate-400 uppercase tracking-wider px-2 py-0.5">
-                内容偏好
+                筛选
               </div>
               <!-- Repost Toggle Button -->
               <button
@@ -1790,7 +2044,7 @@ function formatTime(timestamp: number) {
               >
                 <div class="flex items-center gap-2">
                   <Repeat2 class="w-3.5 h-3.5" :class="{ 'text-amber-600 dark:text-amber-400': hideReposts }" />
-                  <span>{{ hideReposts ? '仅看原创' : '包含转发' }}</span>
+                  <span>{{ hideReposts ? '仅原创' : '含转发' }}</span>
                 </div>
                 <span
                   v-if="repostsCount > 0"
@@ -1811,7 +2065,7 @@ function formatTime(timestamp: number) {
                 <div class="flex items-center gap-2">
                   <ImageIcon v-if="hideTextOnly" class="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
                   <ImageOff v-else class="w-3.5 h-3.5 text-slate-400" />
-                  <span>{{ hideTextOnly ? '仅看图文多媒体' : '过滤纯文字' }}</span>
+                  <span>{{ hideTextOnly ? '仅图文' : '含纯文字' }}</span>
                 </div>
                 <span
                   v-if="textOnlyCount > 0"
@@ -1828,7 +2082,7 @@ function formatTime(timestamp: number) {
               <div class="text-[11px] font-bold text-slate-400 uppercase tracking-wider px-2 py-1 flex items-center justify-between">
                 <div class="flex items-center gap-1">
                   <Tag class="w-3 h-3" />
-                  <span>标签筛选</span>
+                  <span>标签</span>
                 </div>
                 <button
                   v-if="includeTags.size > 0 || excludeTags.size > 0"
@@ -1836,11 +2090,11 @@ function formatTime(timestamp: number) {
                   @click="clearAllTagFilters"
                   class="text-[10px] text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer lowercase"
                 >
-                  重置
+                  清除
                 </button>
               </div>
               <p class="text-[10px] text-slate-400 dark:text-slate-500 px-2 pb-1">
-                点击切换：正选(+) / 反选排除(-) / 取消
+                点击循环：包含 → 排除 → 全部
               </p>
               <div class="flex flex-wrap gap-1.5 pt-1 px-1">
                 <button
@@ -1919,6 +2173,7 @@ function formatTime(timestamp: number) {
                 :creators="creators"
                 :channels="channels"
                 @bookmark="toggleBookmarkPost"
+                @delete="handleDeletePost"
                 @read="markPostRead"
                 @media="lightboxMedia = $event"
                 @avatar-error="handleAvatarError"
@@ -1948,7 +2203,7 @@ function formatTime(timestamp: number) {
               <div class="flex items-center gap-2">
                 <Users class="w-4 h-4 text-indigo-500" />
                 <span class="text-xs font-bold text-slate-800 dark:text-slate-200">
-                  {{ selectedPlatform === 'all' ? '全部创作者' : `${PLATFORM_REGISTRY[selectedPlatform]?.name || selectedPlatform} 创作者` }}
+                  {{ selectedPlatform === 'all' ? '创作者' : `${PLATFORM_REGISTRY[selectedPlatform]?.name || selectedPlatform} 创作者` }}
                 </span>
                 <span class="text-[10px] px-1.5 py-0.2 rounded-full font-mono bg-slate-100 dark:bg-slate-800 text-slate-500">
                   {{ visibleCreatorsForFilter.length }}
@@ -1956,21 +2211,21 @@ function formatTime(timestamp: number) {
               </div>
               <div v-if="hiddenCreatorsInFilterCount > 0" class="flex items-center gap-1.5">
                 <span class="text-[10px] text-amber-600 dark:text-amber-400 font-medium">
-                  已隐 {{ hiddenCreatorsInFilterCount }} 人
+                  隐藏 {{ hiddenCreatorsInFilterCount }} 人
                 </span>
                 <button
                   type="button"
                   @click="unhideAllCreators"
                   class="text-[10px] text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer font-medium"
                 >
-                  全部恢复
+                  全部显示
                 </button>
               </div>
             </div>
 
             <!-- Hint text -->
             <div class="text-[11px] text-slate-400 px-1 leading-snug">
-              点击作者展开选择屏蔽渠道（仅在全部平台生效）；点击眼睛可隐藏整位作者。
+              点击展开选择显示/隐藏的平台，点击 👁 隐藏创作者
             </div>
 
             <!-- Empty Creators under filter -->
@@ -1978,7 +2233,7 @@ function formatTime(timestamp: number) {
               v-if="visibleCreatorsForFilter.length === 0"
               class="text-center py-6 text-xs text-slate-400 bg-slate-50/50 dark:bg-slate-850/50 rounded-xl border border-dashed border-slate-200 dark:border-slate-800"
             >
-              当前筛选分类下暂无创作者
+              当前筛选下无创作者
             </div>
 
             <!-- Creator Cards List in Right Sidebar -->
@@ -2021,12 +2276,12 @@ function formatTime(timestamp: number) {
                         {{ c.name }}
                       </div>
                       <div class="flex items-center gap-1.5 text-[10px] text-slate-400 mt-0.5">
-                        <span>{{ getCreatorPlatforms(c.id).length }} 个渠道</span>
+                        <span>{{ getCreatorPlatforms(c.id).length }} 个平台</span>
                         <span
                           v-if="selectedPlatform === 'all' && hiddenCreatorPlatforms[c.id]?.length"
                           class="px-1.5 py-0.2 rounded-full bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400 font-medium text-[9px] border border-rose-200/60 dark:border-rose-900/60"
                         >
-                          已隐 {{ hiddenCreatorPlatforms[c.id].length }} 平台
+                          隐藏 {{ hiddenCreatorPlatforms[c.id].length }} 平台
                         </span>
                       </div>
                     </div>
@@ -2058,7 +2313,7 @@ function formatTime(timestamp: number) {
                   class="p-2.5 pt-2 bg-slate-100/70 dark:bg-slate-900/70 border-t border-slate-200/60 dark:border-slate-800 space-y-2 text-xs animate-in fade-in duration-150"
                 >
                   <div class="flex items-center justify-between text-[10px] text-slate-400 px-0.5">
-                    <span>渠道屏蔽设置（仅全部平台生效）：</span>
+                    <span>选择显示的平台：</span>
                     <button
                       v-if="hiddenCreatorPlatforms[c.id]?.length"
                       type="button"
@@ -2071,7 +2326,7 @@ function formatTime(timestamp: number) {
 
                   <!-- Platform items of this creator -->
                   <div v-if="getCreatorPlatforms(c.id).length === 0" class="text-center py-2 text-[11px] text-slate-400">
-                    暂未绑定任何平台渠道
+                    暂无绑定账号
                   </div>
                   <div v-else class="space-y-1.5">
                     <div
@@ -2102,11 +2357,11 @@ function formatTime(timestamp: number) {
                       <div class="flex items-center gap-1 shrink-0 text-[10px] font-medium ml-2">
                         <span v-if="hiddenCreatorPlatforms[c.id]?.includes(pKey)" class="flex items-center gap-0.5 text-rose-600 dark:text-rose-400 px-1.5 py-0.5 rounded-md bg-rose-100/70 dark:bg-rose-950/80 border border-rose-200 dark:border-rose-800">
                           <EyeOff class="w-3 h-3" />
-                          <span>已屏蔽</span>
+                          <span>已隐藏</span>
                         </span>
                         <span v-else class="flex items-center gap-0.5 text-emerald-600 dark:text-emerald-400 px-1.5 py-0.5 rounded-md bg-emerald-50 dark:bg-emerald-950/60 border border-emerald-200 dark:border-emerald-800">
                           <Eye class="w-3 h-3" />
-                          <span>展示</span>
+                          <span>显示中</span>
                         </span>
                       </div>
                     </div>
@@ -2125,10 +2380,10 @@ function formatTime(timestamp: number) {
             <div class="flex items-center gap-2">
               <h2 class="font-bold text-lg text-slate-900 dark:text-white">关注管理</h2>
               <span class="px-2 py-0.5 text-xs font-semibold rounded-full bg-indigo-50 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-400 border border-indigo-100 dark:border-indigo-900">
-                共 {{ filteredCreatorsList.length }} / {{ creators.length }} 位
+                {{ filteredCreatorsList.length }} / {{ creators.length }} 位
               </span>
             </div>
-            <p class="text-xs text-slate-500 mt-0.5">归集同一创作者在各平台的账号，支持按条数与时间范围深度回溯历史动态，支持批量管理。</p>
+            <p class="text-xs text-slate-500 mt-0.5">管理关注的创作者和绑定的各平台账号</p>
           </div>
           <div class="flex items-center gap-2">
             <button
@@ -2137,14 +2392,14 @@ function formatTime(timestamp: number) {
               class="flex items-center gap-1.5 px-3 py-2 border rounded-xl text-xs font-semibold shadow-2xs transition-colors cursor-pointer"
             >
               <CheckSquare class="w-3.5 h-3.5" />
-              <span>{{ isBatchMode ? '退出批量' : '批量管理' }}</span>
+              <span>{{ isBatchMode ? '完成' : '批量' }}</span>
             </button>
             <button
               @click="openAddModal('new')"
               class="flex items-center gap-1.5 px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-xs transition-colors cursor-pointer"
             >
               <Plus class="w-4 h-4" />
-              <span>创建创作者档案</span>
+              <span>+ 新建</span>
             </button>
           </div>
         </div>
@@ -2158,7 +2413,7 @@ function formatTime(timestamp: number) {
               <input
                 v-model="creatorSearch"
                 type="text"
-                placeholder="搜索创作者姓名、标签、平台账号或别名..."
+                placeholder="搜索创作者..."
                 class="w-full pl-9 pr-8 py-2 bg-slate-100 dark:bg-slate-800 border-none rounded-xl text-xs outline-none focus:ring-2 focus:ring-indigo-500 text-slate-800 dark:text-slate-100 placeholder:text-slate-400"
               />
               <button
@@ -2174,7 +2429,7 @@ function formatTime(timestamp: number) {
             <div class="flex items-center gap-2 shrink-0">
               <div class="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-slate-100 dark:bg-slate-800 text-xs text-slate-600 dark:text-slate-300">
                 <ArrowUpDown class="w-3.5 h-3.5 text-slate-400" />
-                <span class="text-[11px] text-slate-400 font-medium">排序:</span>
+                <span class="text-[11px] text-slate-400 font-medium">排序</span>
                 <select
                   v-model="creatorSortBy"
                   class="bg-transparent border-none text-xs font-medium text-slate-700 dark:text-slate-200 focus:outline-none cursor-pointer"
@@ -2251,9 +2506,6 @@ function formatTime(timestamp: number) {
               <span v-else-if="getTagFilterState(t) === 'exclude'" class="text-[10px] font-black">−</span>
               <span>#{{ t }}</span>
             </button>
-            <span class="text-[10px] text-slate-400 ml-2 hidden sm:inline">
-              (点击循环：包含+ / 排除- / 取消)
-            </span>
           </div>
         </div>
 
@@ -2268,7 +2520,7 @@ function formatTime(timestamp: number) {
               class="flex items-center gap-1.5 px-3 py-1.5 bg-white dark:bg-slate-900 border border-indigo-200 dark:border-indigo-800 rounded-lg text-xs font-medium text-slate-700 dark:text-slate-200 hover:bg-indigo-50 cursor-pointer"
             >
               <CheckSquare class="w-3.5 h-3.5 text-indigo-600" />
-              <span>全选本页 ({{ filteredCreatorsList.length }})</span>
+              <span>全选 ({{ filteredCreatorsList.length }})</span>
             </button>
             <button
               @click="clearCreatorSelection"
@@ -2277,7 +2529,7 @@ function formatTime(timestamp: number) {
               清空选择
             </button>
             <span class="text-xs font-semibold text-indigo-700 dark:text-indigo-300">
-              已选中 {{ selectedCreatorIds.size }} 位创作者
+              已选 {{ selectedCreatorIds.size }} 位
             </span>
           </div>
 
@@ -2296,7 +2548,7 @@ function formatTime(timestamp: number) {
               class="flex items-center gap-1.5 px-3 py-1.5 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-semibold disabled:opacity-40 transition-colors cursor-pointer shadow-2xs"
             >
               <Trash2 class="w-3.5 h-3.5" />
-              <span>批量删除档案</span>
+              <span>删除选中</span>
             </button>
           </div>
         </div>
@@ -2304,7 +2556,7 @@ function formatTime(timestamp: number) {
         <!-- Empty Creators State -->
         <div v-if="creators.length === 0" class="text-center py-16 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800">
           <Users class="w-10 h-10 text-slate-400 mx-auto mb-3" />
-          <p class="text-xs text-slate-500 mb-4">名录中暂无已关注的创作者</p>
+          <p class="text-xs text-slate-500 mb-4">还没有关注任何创作者</p>
           <button
             @click="loadDemoData"
             class="px-4 py-2 text-xs font-semibold bg-indigo-50 hover:bg-indigo-100 text-indigo-600 dark:bg-indigo-950/60 dark:text-indigo-300 rounded-xl cursor-pointer"
@@ -2316,12 +2568,12 @@ function formatTime(timestamp: number) {
         <!-- Empty Filter Results -->
         <div v-else-if="filteredCreatorsList.length === 0" class="text-center py-16 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800">
           <Search class="w-8 h-8 text-slate-400 mx-auto mb-2" />
-          <p class="text-xs text-slate-500 mb-3">未找到符合当前筛选条件的创作者</p>
+          <p class="text-xs text-slate-500 mb-3">未找到匹配的创作者</p>
           <button
             @click="creatorSearch = ''; creatorPlatformFilter = 'all'; creatorTagFilter = 'all'; clearAllTagFilters();"
             class="px-3 py-1.5 text-xs font-medium text-indigo-600 bg-indigo-50 dark:bg-indigo-950/50 rounded-lg hover:underline cursor-pointer"
           >
-            重置所有筛选条件
+            清除筛选
           </button>
         </div>
 
@@ -2346,18 +2598,26 @@ function formatTime(timestamp: number) {
                   <Square v-else class="w-5 h-5 text-slate-400" />
                 </button>
 
-                <!-- Avatar -->
-                <div class="w-11 h-11 rounded-xl bg-gradient-to-br from-indigo-50 to-violet-100 dark:from-indigo-950/70 dark:to-violet-900/50 flex items-center justify-center text-indigo-600 font-black text-lg overflow-hidden border border-indigo-100 dark:border-indigo-900 shrink-0 shadow-inner">
+                <!-- Avatar with Hover Change Overlay -->
+                <div
+                  class="relative group/avatar w-11 h-11 rounded-xl bg-gradient-to-br from-indigo-50 to-violet-100 dark:from-indigo-950/70 dark:to-violet-900/50 flex items-center justify-center text-indigo-600 font-black text-lg overflow-hidden border border-indigo-100 dark:border-indigo-900 shrink-0 shadow-inner cursor-pointer"
+                  @click.stop="openAvatarPicker(c)"
+                  title="更换主头像"
+                >
                   <img
                     v-if="getCreatorAvatar(c)"
                     :src="getCreatorAvatar(c)"
                     referrerpolicy="no-referrer"
                     @error="handleAvatarError(getCreatorAvatar(c))"
-                    class="w-full h-full object-cover"
+                    class="w-full h-full object-cover transition-transform duration-200 group-hover/avatar:scale-105"
                   />
                   <span v-else>{{ c.name.slice(0, 1) }}</span>
+
+                  <!-- Subtle hover mask & camera icon -->
+                  <div class="absolute inset-0 bg-black/40 opacity-0 group-hover/avatar:opacity-100 transition-opacity flex items-center justify-center text-white">
+                    <Camera class="w-4 h-4 drop-shadow" />
+                  </div>
                 </div>
-                    <button @click.stop="openAvatarPicker(c)" class="text-[10px] text-indigo-600 dark:text-indigo-400 hover:underline cursor-pointer">选择主头像</button>
 
                 <!-- Name & Meta Tags -->
                 <div class="min-w-0">
@@ -2377,7 +2637,7 @@ function formatTime(timestamp: number) {
                     >
                       #{{ t }}
                     </span>
-                    <span v-if="!c.tags?.length" class="text-[10px] text-slate-400">无标签</span>
+                    <span v-if="!c.tags?.length" class="text-[10px] text-slate-400">未分类</span>
                     <!-- Edit tags button -->
                     <button
                       type="button"
@@ -2397,11 +2657,11 @@ function formatTime(timestamp: number) {
                 <!-- Open Deep History Sync Modal Button -->
                 <button
                   @click="openDeepSyncModal(c)"
-                  title="深度回溯历史动态（自定义条数 / 时间跨度 / 挖掘到尽头）"
+                  title="回溯更早的历史动态"
                   class="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/60 dark:hover:bg-indigo-900/60 text-indigo-600 dark:text-indigo-400 text-xs font-semibold transition-colors cursor-pointer border border-indigo-200/60 dark:border-indigo-800/60 shadow-2xs"
                 >
                   <History class="w-3.5 h-3.5" />
-                  <span class="hidden sm:inline">深度历史</span>
+                  <span class="hidden sm:inline">回溯历史</span>
                 </button>
                 <!-- Quick Sync Latest -->
                 <button
@@ -2428,7 +2688,7 @@ function formatTime(timestamp: number) {
                 <span class="font-semibold text-slate-700 dark:text-slate-300">已绑定账号</span>
                 <button @click="openAddModal('channel', c)" class="text-indigo-600 hover:text-indigo-700 dark:text-indigo-400 font-semibold flex items-center gap-1 cursor-pointer bg-indigo-50 dark:bg-indigo-950/60 px-2 py-1 rounded-lg border border-indigo-100 dark:border-indigo-900 transition-colors">
                   <Plus class="w-3 h-3" />
-                  <span>绑定账号</span>
+                  <span>+ 绑定新账号</span>
                 </button>
               </div>
 
@@ -2513,10 +2773,11 @@ function formatTime(timestamp: number) {
                         >
                           <History class="w-3.5 h-3.5" />
                         </button>
-                        <!-- Refresh Channel Latest -->
+                        <!-- Refresh Channel Latest (Normal click: incremental; Shift+click: force refresh existing) -->
                         <button
-                          @click="handleRefreshChannel(ch)"
-                          title="同步此账号最新动态"
+                          @click="handleRefreshChannel(ch, false)"
+                          @click.shift.stop="handleRefreshChannel(ch, true)"
+                          title="同步最新动态 (按住 Shift 点击可强制重新刷新覆盖已有内容与图片)"
                           class="p-1 text-slate-500 hover:text-indigo-600 dark:text-slate-400 dark:hover:text-indigo-400 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors cursor-pointer"
                         >
                           <RefreshCw class="w-3.5 h-3.5" :class="{ 'animate-spin': ch.status === 'updating' }" />
@@ -2545,7 +2806,7 @@ function formatTime(timestamp: number) {
                 </div>
 
                 <div v-if="channels.filter(ch => ch.creatorId === c.id).length === 0" class="text-center py-4 text-xs text-slate-400">
-                  暂未关联任何平台账号，点击上方“追加新账号 / 小号”绑定
+                  暂无绑定账号，点击上方 + 绑定新账号
                 </div>
               </div>
             </div>
@@ -2666,6 +2927,7 @@ function formatTime(timestamp: number) {
                 :channels="channels"
                 bookmarked
                 @bookmark="toggleBookmarkPost"
+                @delete="handleDeletePost"
                 @read="markPostRead"
                 @media="lightboxMedia = $event"
                 @avatar-error="handleAvatarError"
@@ -2680,9 +2942,9 @@ function formatTime(timestamp: number) {
         <div class="p-5 bg-gradient-to-r from-indigo-900/10 to-violet-900/10 dark:from-indigo-950/50 dark:to-violet-950/50 border border-indigo-200 dark:border-indigo-800/60 rounded-2xl flex items-start gap-3">
           <ShieldCheck class="w-6 h-6 text-indigo-600 dark:text-indigo-400 shrink-0 mt-0.5" />
           <div class="text-xs space-y-1">
-            <h4 class="font-bold text-slate-900 dark:text-white text-sm">本地沙箱与隐私保障</h4>
+            <h4 class="font-bold text-slate-900 dark:text-white text-sm">隐私与安全</h4>
             <p class="text-slate-600 dark:text-slate-300 leading-relaxed">
-              本扩展所有网络请求均在你的本地浏览器安全沙箱内执行，登录 Cookie 与订阅关系 100% 留存在本地设备。无任何外部遥测服务，无隐私泄露隐患。
+              所有数据仅存储在本地浏览器中，不会上传任何信息到外部服务器。
             </p>
           </div>
         </div>
@@ -2692,13 +2954,10 @@ function formatTime(timestamp: number) {
           <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <h3 class="font-bold text-base text-slate-900 dark:text-white flex items-center gap-2">
-                <span>平台服务生态与适配器枢纽</span>
-                <span class="text-[11px] font-normal px-2 py-0.5 rounded-full bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800">
-                  可扩展架构
-                </span>
+                <span>平台与登录状态</span>
               </h3>
               <p class="text-xs text-slate-500 mt-0.5">
-                统一管理已集成的平台适配器与登录凭证。各适配器相互解耦隔离，支持扩展接入通用 RSS 与独立站点。
+                查看各平台的登录状态和连接情况
               </p>
             </div>
             <div class="flex items-center gap-2 shrink-0">
@@ -2707,14 +2966,14 @@ function formatTime(timestamp: number) {
                 class="px-3 py-1.5 text-xs font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 rounded-lg border border-indigo-200 dark:border-indigo-800 flex items-center gap-1 cursor-pointer transition-colors"
               >
                 <Plus class="w-3.5 h-3.5" />
-                <span>+ 自定义订阅源</span>
+                <span>+ 添加 RSS 源</span>
               </button>
               <button
                 @click="checkPlatformLogins"
                 class="px-3 py-1.5 text-xs font-medium text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 rounded-lg hover:bg-slate-200 cursor-pointer flex items-center gap-1.5 transition-colors"
               >
                 <RefreshCw class="w-3.5 h-3.5" />
-                <span>刷新状态检测</span>
+                <span>检测登录状态</span>
               </button>
             </div>
           </div>
@@ -2723,12 +2982,12 @@ function formatTime(timestamp: number) {
           <div class="p-3.5 bg-slate-50 dark:bg-slate-800/40 rounded-xl border border-slate-200/60 dark:border-slate-800 text-[11px] text-slate-600 dark:text-slate-300 space-y-1.5">
             <div class="font-semibold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
               <Sparkles class="w-3.5 h-3.5 text-indigo-500 shrink-0" />
-              <span>多平台会话与凭证调度指引：</span>
+              <span>登录说明：</span>
             </div>
-            <p>• <b>Cookie 自动继承</b>：B站、抖音、Pixiv、Fantia、Withny 均直接利用 Chrome 浏览器同源会话，打开主站登录即可生效，零人工介入。</p>
-            <p>• <b>单页应用 LocalStorage</b>：Rplay 等 SPA 站点将会话存于本地存储。可在其适配器卡片中点击“从打开的标签页同步 Token”。</p>
-            <p>• <b>抗限流同源抓取</b>：Twitter / X 会结合浏览器活跃标签页与同源请求，化解近年推特严苛的限流风控。</p>
-            <p>• <b>通用订阅协议</b>：支持标准 RSS 2.0 / Atom 1.0 与各类 RSSHub 路由，可订阅博客、Substack、Patreon 等海量外部资源。</p>
+            <p>• <b>大多数平台</b>（B站、Pixiv、Fantia、Withny 等）自动使用浏览器登录状态，在主站登录即可生效。</p>
+            <p>• <b>单页应用 (SPA)</b>：Rplay 等站点可在卡片中点击“从当前页同步”。</p>
+            <p>• <b>抗限流同源抓取</b>：X (Twitter) 结合浏览器活跃标签页与同源请求，保障同步稳定性。</p>
+            <p>• <b>通用订阅协议</b>：支持标准 RSS 2.0 / Atom 1.0 与 RSSHub 源，订阅博客、Substack 等外部内容。</p>
           </div>
 
           <!-- Platform Grid with Per-Platform Contextual Actions -->
@@ -2762,7 +3021,7 @@ function formatTime(timestamp: number) {
                 <!-- Rplay specific action -->
                 <div v-if="key === 'rplay'" class="space-y-2">
                   <div class="flex items-center justify-between text-[11px] px-0.5">
-                    <span class="text-slate-500 dark:text-slate-400">凭证状态:</span>
+                    <span class="text-slate-500 dark:text-slate-400">登录状态:</span>
                     <span
                       class="font-mono text-[10px] px-2 py-0.5 rounded-full font-medium"
                       :class="platformLoginStatus['rplay'] ? 'bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'"
@@ -2777,7 +3036,7 @@ function formatTime(timestamp: number) {
                       title="在浏览器中打开 rplay.live 后点击一键同步"
                     >
                       <Link class="w-3.5 h-3.5" />
-                      <span>标签页同步</span>
+                      <span>从当前页同步</span>
                     </button>
                     <button
                       @click="promptManualRplayToken"
@@ -2785,7 +3044,7 @@ function formatTime(timestamp: number) {
                       title="手动输入、粘贴或修改 Rplay Token"
                     >
                       <Key class="w-3.5 h-3.5 text-slate-500" />
-                      <span>手动粘贴</span>
+                      <span>手动输入</span>
                     </button>
                   </div>
                 </div>
@@ -2797,7 +3056,7 @@ function formatTime(timestamp: number) {
                   class="w-full py-1.5 px-2 text-xs font-medium text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 rounded-lg flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
                 >
                   <RefreshCw class="w-3.5 h-3.5" />
-                  <span>检测推特本地会话</span>
+                  <span>检测 X/Twitter 登录</span>
                 </button>
 
                 <!-- RSS specific action -->
@@ -2807,7 +3066,7 @@ function formatTime(timestamp: number) {
                   class="w-full py-1.5 px-2 text-xs font-medium text-indigo-700 dark:text-indigo-300 bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 rounded-lg border border-indigo-200 dark:border-indigo-800 flex items-center justify-center gap-1.5 cursor-pointer transition-colors"
                 >
                   <Plus class="w-3.5 h-3.5" />
-                  <span>订阅新 RSS / Feed 源</span>
+                  <span>添加 RSS 订阅</span>
                 </button>
 
                 <!-- Cookie based or open platforms -->
@@ -2817,7 +3076,7 @@ function formatTime(timestamp: number) {
                   target="_blank"
                   class="w-full py-1.5 px-2 text-xs font-medium text-slate-600 dark:text-slate-400 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 rounded-lg flex items-center justify-center gap-1.5 transition-colors"
                 >
-                  <span>前往主站登录 ↗</span>
+                  <span>打开登录页 ↗</span>
                 </a>
               </div>
             </div>
@@ -2839,29 +3098,8 @@ function formatTime(timestamp: number) {
         <!-- Data Backup & Restore -->
         <div class="p-6 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
           <div>
-            <h3 class="font-bold text-base text-slate-900 dark:text-white">数据资产、存储机制与备份迁移</h3>
-            <p class="text-xs text-slate-500 mt-0.5">所有创作者档案与动态均持久化存储于浏览器的轻量 IndexedDB 数据库中，结构精简不膨胀，支持随时导出独立备份。</p>
-          </div>
-
-          <!-- Chrome Sandbox Storage Clarification Banner -->
-          <div class="p-4 bg-slate-50 dark:bg-slate-850/60 rounded-xl border border-slate-200/80 dark:border-slate-800 text-xs text-slate-600 dark:text-slate-300 space-y-2">
-            <div class="flex items-center gap-2 font-bold text-slate-800 dark:text-slate-200">
-              <ShieldCheck class="w-4 h-4 text-indigo-500" />
-              <span>为什么不能直接静默写入插件源码解压文件夹？</span>
-            </div>
-            <p class="leading-relaxed text-[11px]">
-              • <b>Chromium MV3 沙箱底层安全限制</b>：Chrome 严格禁止任何浏览器扩展在运行期间任意静默向自身的解压代码目录（如 <code>creator-feed-hub/</code>）写入或覆写文件。这是浏览器的硬性安全红线，用于防止恶意网页脚本静默篡改扩展自身的 JS/Manifest 代码注入后门。
-            </p>
-            <p class="leading-relaxed text-[11px]">
-              • <b>本地数据的实际物理保存位置</b>：你的所有创作者档案、历史动态作品均 100% 安全持久化保存在本地磁盘的 Chrome 专属数据库中：<br />
-              <code class="px-1.5 py-0.5 rounded bg-slate-200/80 dark:bg-slate-800 text-[10px] font-mono select-all break-all">
-                %LOCALAPPDATA%\Google\Chrome\User Data\Default\IndexedDB\chrome-extension_..._0.indexeddb.leveldb
-              </code><br />
-              这是高性能 LevelDB 二进制库，关机重启不丢失，永不上云。
-            </p>
-            <p class="leading-relaxed text-[11px]">
-              • <b>如何归档保存到项目文件夹</b>：点击下方<b>【保存至本地文件 (可直接选项目录)】</b>，调用浏览器原生系统文件对话框，即可直接把完整 JSON 备份保存到项目文件夹（如 <code>creator-feed-hub/data/</code>）中！
-            </p>
+            <h3 class="font-bold text-base text-slate-900 dark:text-white">数据备份与导出</h3>
+            <p class="text-xs text-slate-500 mt-0.5">创作者档案与动态均安全保存在浏览器本地，支持随时导出与恢复独立备份。</p>
           </div>
 
           <div class="flex flex-wrap gap-3">
@@ -2870,7 +3108,7 @@ function formatTime(timestamp: number) {
               class="flex items-center gap-2 px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-semibold shadow-xs transition-colors cursor-pointer"
             >
               <FolderDown class="w-4 h-4" />
-              <span>保存至本地文件 (直接选项目录)</span>
+              <span>导出到文件</span>
             </button>
 
             <button
@@ -2878,12 +3116,12 @@ function formatTime(timestamp: number) {
               class="flex items-center gap-2 px-4 py-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-xl text-xs font-semibold transition-colors cursor-pointer"
             >
               <Download class="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
-              <span>下载备份文件 (JSON)</span>
+              <span>下载 JSON 备份</span>
             </button>
 
             <label class="flex items-center gap-2 px-4 py-2.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 rounded-xl text-xs font-semibold transition-colors cursor-pointer">
               <Upload class="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
-              <span>从备份恢复</span>
+              <span>导入备份</span>
               <input type="file" accept=".json" class="hidden" @change="handleImportFile" />
             </label>
 
@@ -2892,7 +3130,7 @@ function formatTime(timestamp: number) {
               class="flex items-center gap-2 px-4 py-2.5 bg-indigo-50 dark:bg-indigo-950/50 hover:bg-indigo-100 text-indigo-600 dark:text-indigo-300 rounded-xl text-xs font-semibold transition-colors cursor-pointer"
             >
               <Sparkles class="w-4 h-4" />
-              <span>导入演示创作者样例</span>
+              <span>导入演示数据</span>
             </button>
           </div>
         </div>
@@ -2903,7 +3141,7 @@ function formatTime(timestamp: number) {
           <div class="space-y-3">
             <div class="flex items-center justify-between py-2 border-b border-slate-100 dark:border-slate-800 text-xs">
               <div>
-                <div class="font-semibold text-slate-800 dark:text-slate-200">单次同步深度</div>
+                <div class="font-semibold text-slate-800 dark:text-slate-200">每次获取条数</div>
                 <div class="text-[11px] text-slate-400">每次同步时获取的动态条数</div>
               </div>
               <select
@@ -2911,9 +3149,9 @@ function formatTime(timestamp: number) {
                 @change="saveSettings({ itemsPerFetch: settings.itemsPerFetch })"
                 class="px-3 py-1.5 bg-slate-100 dark:bg-slate-800 rounded-lg text-xs outline-none cursor-pointer"
               >
-                <option :value="5">最新 5 条 (轻快推荐)</option>
-                <option :value="10">最新 10 条 (均衡体验)</option>
-                <option :value="20">最新 20 条 (深度获取)</option>
+                <option :value="5">5 条</option>
+                <option :value="10">10 条（推荐）</option>
+                <option :value="20">20 条</option>
               </select>
             </div>
 
@@ -2927,16 +3165,32 @@ function formatTime(timestamp: number) {
                 @change="saveSettings({ requestDelayMs: settings.requestDelayMs })"
                 class="px-3 py-1.5 bg-slate-100 dark:bg-slate-800 rounded-lg text-xs outline-none cursor-pointer"
               >
-                <option :value="300">300 毫秒 (快速)</option>
-                <option :value="600">600 毫秒 (推荐安全)</option>
-                <option :value="1200">1200 毫秒 (极保守防封)</option>
+                <option :value="300">300ms（快）</option>
+                <option :value="600">600ms（推荐）</option>
+                <option :value="1200">1200ms（保守）</option>
               </select>
+            </div>
+
+            <div class="flex items-center justify-between py-2 border-b border-slate-100 dark:border-slate-800 text-xs">
+              <div>
+                <div class="font-semibold text-slate-800 dark:text-slate-200">后台自动更新</div>
+                <div class="text-[11px] text-slate-400">关闭后仅在手动点击“同步全部”时拉取，冷启动与后台绝不发起任何抓取请求</div>
+              </div>
+              <label class="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  v-model="settings.enableAutoSync"
+                  @change="saveSettings({ enableAutoSync: settings.enableAutoSync }); chrome.runtime?.sendMessage?.({ type: 'UPDATE_AUTO_SYNC' });"
+                  class="sr-only peer"
+                />
+                <div class="w-9 h-5 bg-slate-200 peer-focus:outline-none rounded-full peer dark:bg-slate-700 peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-indigo-600"></div>
+              </label>
             </div>
 
             <div class="flex items-center justify-between py-2 text-xs">
               <div>
-                <div class="font-semibold text-slate-800 dark:text-slate-200">默认过滤转推与转发动态</div>
-                <div class="text-[11px] text-slate-400">聚焦博主本人发布的原创内容，自动在动态流中隐藏推特转推与 B站转发 (可随时在最新动态顶部快捷切换)</div>
+                <div class="font-semibold text-slate-800 dark:text-slate-200">默认隐藏转发</div>
+                <div class="text-[11px] text-slate-400">默认隐藏转发/转推内容，可在动态页随时切换</div>
               </div>
               <label class="relative inline-flex items-center cursor-pointer">
                 <input
@@ -2956,26 +3210,26 @@ function formatTime(timestamp: number) {
           <div class="flex items-center justify-between">
             <div>
               <h3 class="font-bold text-base text-slate-900 dark:text-white flex items-center gap-2">
-                <span>数据库存储与缓存健康</span>
+                <span>存储管理</span>
                 <span class="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-950/60 dark:text-emerald-300 dark:border-emerald-800">
                   运行良好
                 </span>
               </h3>
-              <p class="text-[11px] text-slate-400 mt-0.5">采用 IndexedDB 本地沙盒持久化，无隐形体积膨胀，支持手动释放历史旧缓存</p>
+              <p class="text-[11px] text-slate-400 mt-0.5">数据存储在本地浏览器中，可手动清理历史数据释放空间</p>
             </div>
             <button
               type="button"
               @click="reloadData"
               class="px-2.5 py-1 text-xs bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg text-slate-600 dark:text-slate-300 transition-colors cursor-pointer"
             >
-              刷新容量统计
+              刷新
             </button>
           </div>
 
           <!-- Metrics Grid -->
           <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
             <div class="p-3 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-100 dark:border-slate-700/60">
-              <div class="text-[10px] text-slate-400 font-medium">已收录动态总数</div>
+              <div class="text-[10px] text-slate-400 font-medium">动态总数</div>
               <div class="text-base font-bold text-slate-900 dark:text-white mt-0.5">{{ dbStats.totalPostsCount }} 条</div>
             </div>
             <div class="p-3 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-100 dark:border-slate-700/60">
@@ -2983,12 +3237,12 @@ function formatTime(timestamp: number) {
               <div class="text-base font-bold text-amber-600 dark:text-amber-400 mt-0.5">{{ dbStats.bookmarkedPostsCount }} 条</div>
             </div>
             <div class="p-3 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-100 dark:border-slate-700/60">
-              <div class="text-[10px] text-slate-400 font-medium">已占用本地存储</div>
+              <div class="text-[10px] text-slate-400 font-medium">存储占用</div>
               <div class="text-base font-bold text-indigo-600 dark:text-indigo-400 mt-0.5">{{ formatBytes(dbStats.storageUsageBytes) }}</div>
             </div>
             <div class="p-3 bg-slate-50 dark:bg-slate-800/60 rounded-xl border border-slate-100 dark:border-slate-700/60">
-              <div class="text-[10px] text-slate-400 font-medium">关注创作者 / 渠道</div>
-              <div class="text-base font-bold text-slate-900 dark:text-white mt-0.5">{{ dbStats.creatorsCount }} 位 / {{ dbStats.channelsCount }} 号</div>
+              <div class="text-[10px] text-slate-400 font-medium">创作者 / 账号</div>
+              <div class="text-base font-bold text-slate-900 dark:text-white mt-0.5">{{ dbStats.creatorsCount }} 位 / {{ dbStats.channelsCount }} 个</div>
             </div>
           </div>
 
@@ -3000,11 +3254,21 @@ function formatTime(timestamp: number) {
             <div class="flex items-center gap-2">
               <button
                 type="button"
+                @click="handleHealBrokenMedia"
+                :disabled="isHealingMedia"
+                class="px-3 py-1.5 bg-indigo-50 dark:bg-indigo-950/50 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800/60 rounded-xl font-medium transition-colors cursor-pointer disabled:opacity-50 flex items-center gap-1.5"
+                title="自动扫描并纠正本地数据库中小红书受限 CDN 域名，恢复旧笔记正常显示"
+              >
+                <Sparkles class="w-3.5 h-3.5" :class="{ 'animate-spin': isHealingMedia }" />
+                <span>{{ isHealingMedia ? '修复中...' : '一键修复小红书图裂' }}</span>
+              </button>
+              <button
+                type="button"
                 @click="handleCleanupPosts(60)"
                 :disabled="isCleaningStorage"
                 class="px-3 py-1.5 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-xl font-medium transition-colors cursor-pointer disabled:opacity-50"
               >
-                清理 60 天前未收藏动态
+                清理 60 天前数据
               </button>
               <button
                 type="button"
@@ -3012,8 +3276,147 @@ function formatTime(timestamp: number) {
                 :disabled="isCleaningStorage"
                 class="px-3 py-1.5 bg-rose-50 dark:bg-rose-950/40 hover:bg-rose-100 dark:hover:bg-rose-900/60 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800/60 rounded-xl font-medium transition-colors cursor-pointer disabled:opacity-50"
               >
-                清理 30 天前旧动态
+                清理 30 天前数据
               </button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Dynamic Recycle Bin Card (In Settings) -->
+        <div id="recycle-bin-section" class="p-6 bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs space-y-4">
+          <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h3 class="font-bold text-base text-slate-900 dark:text-white flex items-center gap-2">
+                <Trash2 class="w-4 h-4 text-rose-500" />
+                <span>动态回收站 (安全兜底与定向找回)</span>
+                <span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-rose-50 dark:bg-rose-950/60 text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-800/60">
+                  {{ deletedPostCount }} 条记录
+                </span>
+              </h3>
+              <p class="text-xs text-slate-500 mt-1">
+                所有手动删除的动态均在此安全兜底。日常“一键同步”默认不拉取回收站中的内容；您可在此随时“定向找回”并即刻无缝还原至动态流，避免误删导致无法恢复。
+              </p>
+            </div>
+            <div class="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                v-if="deletedPostCount > 0"
+                @click="handleRestoreAllAndSync"
+                class="px-3.5 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 rounded-xl shadow-xs transition-colors cursor-pointer flex items-center gap-1.5"
+                title="将回收站中的所有动态定向还原到动态列表"
+              >
+                <RotateCcw class="w-3.5 h-3.5" />
+                <span>全部找回并还原</span>
+              </button>
+              <button
+                type="button"
+                v-if="deletedPostCount > 0"
+                @click="handleEmptyRecycleBin"
+                class="px-3.5 py-1.5 text-xs font-semibold text-slate-500 hover:text-rose-600 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-xl border border-slate-200 dark:border-slate-700 transition-colors cursor-pointer flex items-center gap-1"
+                title="彻底清空回收站"
+              >
+                <span>清空回收站</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Filter & Search (if records exist) -->
+          <div v-if="deletedPostsList.length > 0" class="pt-2 flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+            <div class="relative flex-1">
+              <Search class="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                v-model="deletedPostsSearchQuery"
+                type="text"
+                placeholder="搜索已删除动态关键词、标题或 ID..."
+                class="w-full pl-8.5 pr-3 py-1.5 text-xs bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 text-slate-900 dark:text-white placeholder-slate-400"
+              />
+            </div>
+          </div>
+
+          <!-- Recycle Bin Items List -->
+          <div class="space-y-2.5 max-h-96 overflow-y-auto pr-1">
+            <div
+              v-if="filteredDeletedPostsList.length === 0"
+              class="py-8 text-center bg-slate-50/50 dark:bg-slate-850/40 rounded-xl border border-dashed border-slate-200 dark:border-slate-800 text-xs text-slate-400"
+            >
+              <Trash2 class="w-6 h-6 mx-auto mb-2 text-slate-300 dark:text-slate-600" />
+              <span>{{ deletedPostsSearchQuery ? '未找到符合搜索条件的回收站记录' : '回收站为空，暂无已删除动态' }}</span>
+            </div>
+
+            <div
+              v-for="record in filteredDeletedPostsList"
+              :key="record.id"
+              class="p-3.5 bg-slate-50/80 dark:bg-slate-850/60 rounded-xl border border-slate-200/80 dark:border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs transition-all hover:border-slate-300 dark:hover:border-slate-700"
+            >
+              <div class="flex items-start gap-3 min-w-0 flex-1">
+                <!-- Media cover / thumbnail if available -->
+                <div
+                  v-if="record.postData?.mediaList?.length"
+                  class="w-13 h-13 rounded-lg overflow-hidden bg-slate-200 dark:bg-slate-800 shrink-0 border border-slate-200 dark:border-slate-700"
+                >
+                  <img
+                    :src="toSecureMediaUrl(record.postData.mediaList[0].previewUrl)"
+                    referrerpolicy="no-referrer"
+                    class="w-full h-full object-cover"
+                  />
+                </div>
+
+                <div class="min-w-0 space-y-1 flex-1">
+                  <div class="flex items-center gap-2 flex-wrap">
+                    <span
+                      v-if="record.platform || record.postData?.platform"
+                      :class="PLATFORM_REGISTRY[record.platform || record.postData?.platform || '']?.badgeBg"
+                      class="px-1.5 py-0.2 rounded text-[9px] font-bold border shrink-0"
+                    >
+                      {{ PLATFORM_REGISTRY[record.platform || record.postData?.platform || '']?.name || record.platform }}
+                    </span>
+                    <h4 class="font-bold text-slate-900 dark:text-white truncate max-w-md">
+                      {{ record.title || record.postData?.title || '未命名动态' }}
+                    </h4>
+                  </div>
+
+                  <p v-if="record.postData?.content" class="text-xs text-slate-500 dark:text-slate-400 line-clamp-1">
+                    {{ record.postData.content }}
+                  </p>
+
+                  <div class="flex items-center gap-2 text-[10px] text-slate-400 flex-wrap">
+                    <span class="font-mono truncate max-w-[140px]">ID: {{ record.id }}</span>
+                    <span>•</span>
+                    <span>删除于 {{ new Date(record.deletedAt).toLocaleString('zh-CN') }}</span>
+                    <span v-if="record.postData?.publishedAt">• 发布于 {{ new Date(record.postData.publishedAt).toLocaleDateString('zh-CN') }}</span>
+                  </div>
+                </div>
+              </div>
+
+              <!-- Action buttons on each item -->
+              <div class="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
+                <button
+                  type="button"
+                  @click="handleRestoreSingleDeleted(record)"
+                  class="px-3 py-1.5 text-xs font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 rounded-xl transition-colors cursor-pointer flex items-center gap-1"
+                  title="立即将此动态定向找回并还原到动态流"
+                >
+                  <RotateCcw class="w-3.5 h-3.5" />
+                  <span>定向找回</span>
+                </button>
+                <a
+                  v-if="record.postData?.originalUrl"
+                  :href="record.postData.originalUrl"
+                  target="_blank"
+                  class="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 rounded-lg hover:bg-slate-200/60 dark:hover:bg-slate-700/60 transition-colors"
+                  title="打开原帖"
+                >
+                  <ExternalLink class="w-3.5 h-3.5" />
+                </a>
+                <button
+                  type="button"
+                  @click="handlePermanentlyDelete(record)"
+                  class="p-1.5 text-slate-400 hover:text-rose-500 rounded-lg hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors cursor-pointer"
+                  title="彻底删除"
+                >
+                  <Trash2 class="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -3034,7 +3437,7 @@ function formatTime(timestamp: number) {
               :class="addModalMode === 'new' ? 'bg-white dark:bg-slate-700 shadow-2xs text-indigo-600 dark:text-indigo-300 font-bold' : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'"
               class="px-2.5 py-1 text-xs rounded-lg transition-all cursor-pointer"
             >
-              新建创作者档案
+              新建创作者
             </button>
             <button
               type="button"
@@ -3042,7 +3445,7 @@ function formatTime(timestamp: number) {
               :class="addModalMode === 'channel' ? 'bg-white dark:bg-slate-700 shadow-2xs text-indigo-600 dark:text-indigo-300 font-bold' : 'text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'"
               class="px-2.5 py-1 text-xs rounded-lg transition-all cursor-pointer"
             >
-              绑定已有创作者
+              绑定现有创作者
             </button>
           </div>
           <button @click="showAddModal = false" class="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-sm cursor-pointer p-1">
@@ -3054,8 +3457,8 @@ function formatTime(timestamp: number) {
           <!-- Searchable Creator Selection Combobox when in channel mode -->
           <div v-if="addModalMode === 'channel'" class="space-y-1.5">
             <div class="flex items-center justify-between">
-              <label class="block font-medium text-slate-700 dark:text-slate-300">归属创作者</label>
-              <span class="text-[10px] text-slate-400">支持输入姓名 / 标签模糊搜索</span>
+              <label class="block font-medium text-slate-700 dark:text-slate-300">选择创作者</label>
+              <span class="text-[10px] text-slate-400">支持搜索</span>
             </div>
 
             <!-- Case A: Creator is chosen and not currently searching/editing -->
@@ -3087,7 +3490,7 @@ function formatTime(timestamp: number) {
                 @click="isEditingCreatorSelection = true"
                 class="px-2.5 py-1 text-xs text-indigo-600 hover:text-indigo-700 dark:text-indigo-400 font-semibold bg-white dark:bg-slate-800 hover:bg-slate-100 dark:hover:bg-slate-700 rounded-lg border border-slate-200 dark:border-slate-700 transition-colors cursor-pointer shrink-0"
               >
-                更换创作者
+                更换
               </button>
             </div>
 
@@ -3098,7 +3501,7 @@ function formatTime(timestamp: number) {
                 <input
                   v-model="creatorSearchQuery"
                   type="text"
-                  placeholder="输入创作者姓名 / 拼音 / 标签关键词搜索..."
+                  placeholder="搜索创作者..."
                   class="w-full pl-8.5 pr-8 py-2 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs outline-none focus:ring-1 focus:ring-indigo-500"
                   autofocus
                 />
@@ -3142,13 +3545,13 @@ function formatTime(timestamp: number) {
 
                 <!-- No match state -->
                 <div v-if="filteredCandidateCreators.length === 0" class="p-3 text-center text-xs text-slate-400 space-y-1.5">
-                  <div>未匹配到包含“{{ creatorSearchQuery }}”的创作者</div>
+                  <div>未找到 "{{ creatorSearchQuery }}"</div>
                   <button
                     type="button"
                     @click="switchToNewCreatorWithQuery(creatorSearchQuery)"
                     class="text-indigo-600 dark:text-indigo-400 hover:underline font-semibold cursor-pointer"
                   >
-                    + 以【{{ creatorSearchQuery }}】创建新博主档案
+                    + 新建创作者「{{ creatorSearchQuery }}」
                   </button>
                 </div>
               </div>
@@ -3156,11 +3559,11 @@ function formatTime(timestamp: number) {
           </div>
 
           <div>
-            <label class="block font-medium text-slate-700 dark:text-slate-300 mb-1">主页、作品或 RSS 订阅链接</label>
+            <label class="block font-medium text-slate-700 dark:text-slate-300 mb-1">创作者链接</label>
             <input
               v-model="inputUrl"
               type="text"
-              placeholder="支持输入主页、视频/推文、或 RSS/Atom 链接"
+              placeholder="粘贴主页链接、视频链接或 RSS 地址"
               class="w-full px-3 py-2 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs outline-none focus:ring-1 focus:ring-indigo-500"
             />
 
@@ -3181,12 +3584,12 @@ function formatTime(timestamp: number) {
                     {{ detectedParsedProfile.suggestedName || detectedParsedProfile.accountId }}
                   </div>
                   <div class="text-[10px] text-slate-400 truncate flex items-center gap-1">
-                    <span>账号标识:</span>
+                    <span>ID:</span>
                     <span class="font-mono text-slate-600 dark:text-slate-300">{{ detectedParsedProfile.accountId }}</span>
                   </div>
                 </div>
               </div>
-              <span class="text-[10px] text-emerald-600 dark:text-emerald-400 font-bold shrink-0">✓ 解析成功</span>
+              <span class="text-[10px] text-emerald-600 dark:text-emerald-400 font-bold shrink-0">✓ 已识别</span>
             </div>
           </div>
 
@@ -3197,13 +3600,13 @@ function formatTime(timestamp: number) {
           >
             <Sparkles class="w-3.5 h-3.5 text-sky-600 dark:text-sky-400 shrink-0 mt-0.5" />
             <div>
-              <strong>同平台多账号归集提示：</strong>检测到该创作者已有属于【{{ PLATFORM_REGISTRY[detectedSamePlatformAccounts[0].platform]?.name }}】的账号（{{ detectedSamePlatformAccounts[0].displayName || detectedSamePlatformAccounts[0].accountId }}）。本次添加将作为同平台的小号/副号一并归集展示！
+              该创作者已有同平台账号（{{ detectedSamePlatformAccounts[0].displayName || detectedSamePlatformAccounts[0].accountId }}），本次将作为小号/副号一并绑定。
             </div>
           </div>
 
           <!-- Account Role / Purpose Selection -->
           <div>
-            <label class="block font-medium text-slate-700 dark:text-slate-300 mb-1.5">账号定位与标签</label>
+            <label class="block font-medium text-slate-700 dark:text-slate-300 mb-1.5">账号类型</label>
             <div class="grid grid-cols-4 gap-1.5">
               <button
                 type="button"
@@ -3211,7 +3614,7 @@ function formatTime(timestamp: number) {
                 :class="inputRole === 'main' ? 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-950/80 dark:text-amber-300 dark:border-amber-700 font-bold' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-transparent'"
                 class="py-1.5 text-[11px] rounded-lg border transition-all cursor-pointer text-center"
               >
-                👑 主账号
+                主账号
               </button>
               <button
                 type="button"
@@ -3219,7 +3622,7 @@ function formatTime(timestamp: number) {
                 :class="inputRole === 'sub' ? 'bg-sky-100 text-sky-800 border-sky-300 dark:bg-sky-950/80 dark:text-sky-300 dark:border-sky-700 font-bold' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-transparent'"
                 class="py-1.5 text-[11px] rounded-lg border transition-all cursor-pointer text-center"
               >
-                🏷️ 日常小号
+                小号
               </button>
               <button
                 type="button"
@@ -3227,7 +3630,7 @@ function formatTime(timestamp: number) {
                 :class="inputRole === 'alt' ? 'bg-rose-100 text-rose-800 border-rose-300 dark:bg-rose-950/80 dark:text-rose-300 dark:border-rose-700 font-bold' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-transparent'"
                 class="py-1.5 text-[11px] rounded-lg border transition-all cursor-pointer text-center"
               >
-                🔞 里号/差分
+                里号
               </button>
               <button
                 type="button"
@@ -3235,7 +3638,7 @@ function formatTime(timestamp: number) {
                 :class="inputRole === 'custom' ? 'bg-purple-100 text-purple-800 border-purple-300 dark:bg-purple-950/80 dark:text-purple-300 dark:border-purple-700 font-bold' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-transparent'"
                 class="py-1.5 text-[11px] rounded-lg border transition-all cursor-pointer text-center"
               >
-                🔖 自定义
+                自定义
               </button>
             </div>
             <!-- Custom Label Input if custom role selected -->
@@ -3243,14 +3646,14 @@ function formatTime(timestamp: number) {
               <input
                 v-model="inputCustomLabel"
                 type="text"
-                placeholder="例如：剪辑熟肉、备用号、直播回放、播客"
+                placeholder="输入自定义标签"
                 class="w-full px-3 py-1.5 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs outline-none focus:ring-1 focus:ring-indigo-500"
               />
             </div>
           </div>
 
           <div v-if="addModalMode === 'new'">
-            <label class="block font-medium text-slate-700 dark:text-slate-300 mb-1">创作者统一总称</label>
+            <label class="block font-medium text-slate-700 dark:text-slate-300 mb-1">创作者名称</label>
             <input
               v-model="inputName"
               type="text"
@@ -3263,8 +3666,8 @@ function formatTime(timestamp: number) {
               class="mt-1.5 p-2 bg-indigo-50/90 dark:bg-indigo-950/60 border border-indigo-200/80 dark:border-indigo-800 rounded-xl space-y-1.5"
             >
               <div class="flex items-center justify-between text-[11px] text-indigo-800 dark:text-indigo-300 font-medium">
-                <span>💡 匹配到已有创作者档案：</span>
-                <span class="text-[10px] text-indigo-500">点击直接追加绑定</span>
+                <span>已有创作者：</span>
+                <span class="text-[10px] text-indigo-500">点击绑定</span>
               </div>
               <div class="space-y-1 max-h-36 overflow-y-auto">
                 <div
@@ -3289,7 +3692,7 @@ function formatTime(timestamp: number) {
                     </div>
                   </div>
                   <span class="text-[10px] text-indigo-600 dark:text-indigo-400 font-bold px-2 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/80 shrink-0">
-                    直接追加绑定 →
+                    绑定 →
                   </span>
                 </div>
               </div>
@@ -3297,11 +3700,11 @@ function formatTime(timestamp: number) {
           </div>
 
           <div v-if="addModalMode === 'new'">
-            <label class="block font-medium text-slate-700 dark:text-slate-300 mb-1">标签分类 (逗号分隔)</label>
+            <label class="block font-medium text-slate-700 dark:text-slate-300 mb-1">标签（逗号分隔）</label>
             <input
               v-model="inputTags"
               type="text"
-              placeholder="如：ASMR, 插画, VUP, 游戏"
+              placeholder="如：ASMR, 插画, 游戏"
               class="w-full px-3 py-2 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs outline-none focus:ring-1 focus:ring-indigo-500"
             />
           </div>
@@ -3339,10 +3742,10 @@ function formatTime(timestamp: number) {
             </div>
             <div>
               <h3 class="font-bold text-sm text-slate-900 dark:text-white">
-                深度回溯历史动态 - {{ deepSyncTargetCreator.name }}
+                回溯历史 - {{ deepSyncTargetCreator.name }}
               </h3>
               <p class="text-[11px] text-slate-400">
-                向时间线深处翻页循环获取更早作品，告别固定档位，支持自定义数量与跨度
+                获取更早的历史动态
               </p>
             </div>
           </div>
@@ -3360,7 +3763,7 @@ function formatTime(timestamp: number) {
           <!-- 1. Channels Selection -->
           <div class="space-y-2">
             <label class="block text-xs font-semibold text-slate-700 dark:text-slate-300">
-              选择要深挖的平台账号 (多选)
+              选择要回溯的账号
             </label>
             <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
               <div
@@ -3381,14 +3784,14 @@ function formatTime(timestamp: number) {
               </div>
             </div>
             <p v-if="deepSyncSelectedChannels.length === 0" class="text-[11px] text-rose-500">
-              * 请至少勾选一个平台账号以开始回溯
+              请至少选择一个账号
             </p>
           </div>
 
           <!-- 2. Target Mode: By Count vs By Time Range -->
           <div class="space-y-2 pt-2 border-t border-slate-100 dark:border-slate-800">
             <label class="block text-xs font-semibold text-slate-700 dark:text-slate-300">
-              深度回溯目标
+              回溯范围
             </label>
             <div class="grid grid-cols-2 gap-2">
               <button
@@ -3398,7 +3801,7 @@ function formatTime(timestamp: number) {
                 :class="deepSyncMode === 'count' ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs' : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 border-transparent hover:bg-slate-200 dark:hover:bg-slate-700'"
                 class="py-2 px-3 rounded-xl border text-xs font-semibold transition-all cursor-pointer text-center"
               >
-                按目标条数深挖
+                按数量
               </button>
               <button
                 type="button"
@@ -3407,7 +3810,7 @@ function formatTime(timestamp: number) {
                 :class="deepSyncMode === 'time' ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xs' : 'bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-300 border-transparent hover:bg-slate-200 dark:hover:bg-slate-700'"
                 class="py-2 px-3 rounded-xl border text-xs font-semibold transition-all cursor-pointer text-center"
               >
-                按时间跨度深挖
+                按时间
               </button>
             </div>
           </div>
@@ -3415,9 +3818,9 @@ function formatTime(timestamp: number) {
           <!-- Sub-mode A: Count Selection -->
           <div v-if="deepSyncMode === 'count'" class="space-y-2 bg-slate-50 dark:bg-slate-850 p-3 rounded-xl border border-slate-200/70 dark:border-slate-800">
             <div class="flex items-center justify-between text-xs text-slate-600 dark:text-slate-300 mb-1">
-              <span class="font-medium">设定每账号目标获取作品量：</span>
+              <span class="font-medium">目标数量：</span>
               <span class="font-bold text-indigo-600 dark:text-indigo-400">
-                {{ deepSyncTargetCount === 0 ? '挖掘到最底尽头' : `${deepSyncTargetCount} 条` }}
+                {{ deepSyncTargetCount === 0 ? '全部' : `${deepSyncTargetCount} 条` }}
               </span>
             </div>
 
@@ -3432,13 +3835,13 @@ function formatTime(timestamp: number) {
                 :class="deepSyncTargetCount === preset ? 'bg-indigo-600 text-white font-bold' : 'bg-white dark:bg-slate-800 text-slate-600 dark:text-slate-400 border border-slate-200 dark:border-slate-700 hover:bg-slate-50'"
                 class="px-2.5 py-1 rounded-lg text-xs transition-colors cursor-pointer"
               >
-                {{ preset === 0 ? '尽数挖掘' : `${preset} 条` }}
+                {{ preset === 0 ? '全部' : `${preset} 条` }}
               </button>
             </div>
 
             <!-- Custom Number Input -->
             <div class="flex items-center gap-2 pt-2 text-xs">
-              <span class="text-slate-500 text-[11px] shrink-0">或自定义条数:</span>
+              <span class="text-slate-500 text-[11px] shrink-0">自定义条数:</span>
               <input
                 v-model.number="deepSyncCustomCount"
                 @input="deepSyncTargetCount = deepSyncCustomCount"
@@ -3449,14 +3852,14 @@ function formatTime(timestamp: number) {
                 :disabled="isDeepSyncRunning"
                 class="w-24 px-2.5 py-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg text-xs outline-none focus:ring-1 focus:ring-indigo-500 font-semibold text-slate-800 dark:text-slate-100"
               />
-              <span class="text-slate-400 text-[11px]">(建议 30 ~ 200，大额抓取会自动防风控节流)</span>
+              <span class="text-slate-400 text-[11px]">(建议 30-200)</span>
             </div>
           </div>
 
           <!-- Sub-mode B: Time Range Selection -->
           <div v-else class="space-y-2 bg-slate-50 dark:bg-slate-850 p-3 rounded-xl border border-slate-200/70 dark:border-slate-800">
             <div class="flex items-center justify-between text-xs text-slate-600 dark:text-slate-300 mb-1">
-              <span class="font-medium">回溯时间范围：</span>
+              <span class="font-medium">时间范围：</span>
               <span class="font-bold text-indigo-600 dark:text-indigo-400">
                 {{ deepSyncTimeRange === 0 ? '全部历史作品' : `近 ${deepSyncTimeRange} 天内的作品` }}
               </span>
@@ -3480,8 +3883,8 @@ function formatTime(timestamp: number) {
           <!-- Filter Options (Only Original) -->
           <div class="flex items-center justify-between p-3 bg-slate-50 dark:bg-slate-850 rounded-xl border border-slate-200/70 dark:border-slate-800 text-xs">
             <div class="space-y-0.5">
-              <div class="font-medium text-slate-800 dark:text-slate-200">仅回溯原创作品</div>
-              <div class="text-[11px] text-slate-400">自动跳过转发动态/引用推文，专注回溯创作者本人产出的内容</div>
+              <div class="font-medium text-slate-800 dark:text-slate-200">仅原创</div>
+              <div class="text-[11px] text-slate-400">跳过转发内容，专注回溯创作者本人产出的内容</div>
             </div>
             <input
               v-model="deepSyncOnlyOriginal"
@@ -3496,10 +3899,10 @@ function formatTime(timestamp: number) {
             <div class="flex items-center justify-between text-xs">
               <span class="font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
                 <span v-if="isDeepSyncRunning" class="w-2 h-2 rounded-full bg-indigo-500 animate-ping"></span>
-                <span>{{ deepSyncCurrentStatus || '深度回溯执行中...' }}</span>
+                <span>{{ deepSyncCurrentStatus || '回溯中...' }}</span>
               </span>
               <span class="font-bold text-indigo-600 dark:text-indigo-400">
-                已深挖到 {{ deepSyncTotalNew }} 条新作品
+                已获取 {{ deepSyncTotalNew }} 条
               </span>
             </div>
             <div class="p-2.5 bg-slate-900 text-emerald-400 font-mono text-[11px] rounded-xl h-28 overflow-y-auto space-y-1">
@@ -3518,10 +3921,10 @@ function formatTime(timestamp: number) {
             class="flex items-center gap-1.5 px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-xs font-semibold cursor-pointer shadow-xs"
           >
             <StopCircle class="w-4 h-4" />
-            <span>安全停止抓取 (保留已抓取数据)</span>
+            <span>停止</span>
           </button>
           <div v-else class="text-[11px] text-slate-400">
-            * 抓取到的历史作品将自动去重并安全存入本地 IndexedDB
+            已抓取历史动态自动去重存入本地
           </div>
 
           <div class="flex items-center gap-2">
@@ -3539,7 +3942,7 @@ function formatTime(timestamp: number) {
               class="flex items-center gap-1.5 px-5 py-2 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 rounded-xl shadow-xs cursor-pointer"
             >
               <Play class="w-3.5 h-3.5" />
-              <span>开始深度回溯</span>
+              <span>开始回溯</span>
             </button>
           </div>
         </div>
@@ -3560,7 +3963,7 @@ function formatTime(timestamp: number) {
             </div>
             <div>
               <h3 class="font-bold text-sm text-slate-900 dark:text-white">编辑标签 - {{ editingTagCreator.name }}</h3>
-              <p class="text-[11px] text-slate-500">直接添加、删除或调整此创作者的分类标签</p>
+              <p class="text-[11px] text-slate-500">管理此创作者的分类标签</p>
             </div>
           </div>
           <button
@@ -3576,8 +3979,8 @@ function formatTime(timestamp: number) {
         <div class="space-y-3">
           <div>
             <div class="flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-300 mb-1.5">
-              <span>当前已关联标签：</span>
-              <span class="text-[11px] font-normal text-slate-400">点击标签上的 ✕ 直接删除</span>
+              <span>已有标签：</span>
+              <span class="text-[11px] font-normal text-slate-400">点击 ✕ 移除</span>
             </div>
             
             <div v-if="editingTagsList.length > 0" class="flex flex-wrap gap-1.5 p-2.5 bg-slate-50 dark:bg-slate-800/70 border border-slate-200/80 dark:border-slate-700 rounded-xl min-h-[42px]">
@@ -3598,14 +4001,14 @@ function formatTime(timestamp: number) {
               </span>
             </div>
             <div v-else class="p-3 bg-slate-50 dark:bg-slate-800/40 border border-dashed border-slate-200 dark:border-slate-700 rounded-xl text-center text-xs text-slate-400">
-              暂未关联任何标签，可在下方输入或选择常用标签直接添加
+              暂无标签，在下方输入或选择常用标签
             </div>
           </div>
 
           <!-- Add New Tag Input -->
           <div class="space-y-1.5">
             <label class="block text-xs font-semibold text-slate-700 dark:text-slate-300">
-              添加新标签：
+              添加标签：
             </label>
             <div class="flex items-center gap-2">
               <div class="relative flex-1">
@@ -3614,7 +4017,7 @@ function formatTime(timestamp: number) {
                   v-model="newTagInput"
                   @keydown.enter.prevent="addTagToEditingList()"
                   type="text"
-                  placeholder="输入标签名后按回车或点右侧添加..."
+                  placeholder="输入标签名..."
                   class="w-full pl-7 pr-3.5 py-2 bg-slate-100 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl text-xs outline-none focus:ring-2 focus:ring-indigo-500 text-slate-800 dark:text-slate-100 placeholder:text-slate-400"
                 />
               </div>
@@ -3633,7 +4036,7 @@ function formatTime(timestamp: number) {
         <!-- Quick suggestion tags from existing library & Global Management -->
         <div v-if="allTags.length > 0" class="pt-2 border-t border-slate-100 dark:border-slate-800 space-y-1.5">
           <div class="flex items-center justify-between text-[11px] text-slate-400">
-            <span>已有常用标签库（点击快速切换选中）：</span>
+            <span>常用标签：</span>
           </div>
           <div class="flex flex-wrap gap-1.5 max-h-28 overflow-y-auto pr-1">
             <div
@@ -3658,7 +4061,7 @@ function formatTime(timestamp: number) {
                 type="button"
                 @click.stop="deleteGlobalTag(t)"
                 class="px-1.5 py-1 text-slate-300 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/50 transition-colors border-l border-slate-200/60 dark:border-slate-700/60 cursor-pointer"
-                title="从全库彻底删除此标签（解绑全部创作者）"
+                title="删除此标签"
               >
                 <Trash2 class="w-2.5 h-2.5" />
               </button>
@@ -3688,15 +4091,197 @@ function formatTime(timestamp: number) {
 
     <MediaLightbox v-if="lightboxMedia" :media="lightboxMedia" @close="lightboxMedia = null" />
   </div>
-  <div v-if="avatarPickerCreator" class="fixed inset-0 z-50 bg-black/30 flex items-center justify-center p-4" @click.self="avatarPickerCreator = null">
-    <div class="w-full max-w-sm rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 p-4 shadow-xl">
-      <div class="flex items-center justify-between mb-3"><h3 class="font-bold text-sm">选择主头像</h3><button class="text-slate-400 cursor-pointer" @click="avatarPickerCreator = null">×</button></div>
-      <div class="space-y-2">
-        <button v-for="ch in channels.filter(item => item.creatorId === avatarPickerCreator?.id && item.avatarUrl)" :key="ch.id" class="w-full flex items-center gap-3 p-2 rounded-xl hover:bg-indigo-50 dark:hover:bg-slate-800 text-left cursor-pointer" @click="selectPrimaryAvatar(avatarPickerCreator!, ch.avatarUrl!)">
-          <img :src="toSecureMediaUrl(ch.avatarUrl)" class="w-9 h-9 rounded-full object-cover" referrerpolicy="no-referrer" />
-          <span class="text-xs truncate">{{ PLATFORM_REGISTRY[ch.platform]?.name || ch.platform }} · {{ ch.displayName || ch.accountId }}</span>
+  <!-- Avatar Picker Modal -->
+  <div v-if="avatarPickerCreator" class="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4" @click.self="avatarPickerCreator = null">
+    <div class="w-full max-w-sm rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 p-5 shadow-2xl space-y-4">
+      <div class="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800">
+        <div>
+          <h3 class="font-bold text-sm text-slate-900 dark:text-white">选择主展示头像</h3>
+          <p class="text-[11px] text-slate-400 mt-0.5">{{ avatarPickerCreator.name }} · 从已绑定的各平台账号中挑选</p>
+        </div>
+        <button class="p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer" @click="avatarPickerCreator = null">
+          <X class="w-4 h-4" />
         </button>
-        <p v-if="!channels.some(item => item.creatorId === avatarPickerCreator?.id && item.avatarUrl)" class="text-xs text-slate-400 py-4 text-center">暂无可用平台头像</p>
+      </div>
+
+      <div class="space-y-2 max-h-72 overflow-y-auto pr-1">
+        <button
+          v-for="ch in channels.filter(item => item.creatorId === avatarPickerCreator?.id && item.avatarUrl)"
+          :key="ch.id"
+          class="w-full flex items-center justify-between p-2.5 rounded-xl border transition-all text-left cursor-pointer group"
+          :class="getCreatorAvatar(avatarPickerCreator) === toSecureMediaUrl(ch.avatarUrl) ? 'bg-indigo-50/60 dark:bg-indigo-950/40 border-indigo-300 dark:border-indigo-700' : 'bg-slate-50/50 dark:bg-slate-800/40 border-slate-200/60 dark:border-slate-700/60 hover:bg-indigo-50/30 dark:hover:bg-slate-800 hover:border-indigo-200'"
+          @click="selectPrimaryAvatar(avatarPickerCreator!, ch.avatarUrl!)"
+        >
+          <div class="flex items-center gap-3 min-w-0">
+            <div class="w-10 h-10 rounded-full overflow-hidden border border-slate-200 dark:border-slate-700 shrink-0 shadow-2xs">
+              <img :src="toSecureMediaUrl(ch.avatarUrl)" class="w-full h-full object-cover" referrerpolicy="no-referrer" />
+            </div>
+            <div class="min-w-0">
+              <div class="font-semibold text-xs text-slate-800 dark:text-slate-200 truncate">
+                {{ ch.displayName || ch.accountId }}
+              </div>
+              <div class="flex items-center gap-1.5 mt-0.5">
+                <span :class="PLATFORM_REGISTRY[ch.platform]?.badgeBg" class="px-1.5 py-0.2 rounded text-[9px] font-bold border">
+                  {{ PLATFORM_REGISTRY[ch.platform]?.name || ch.platform }}
+                </span>
+                <span class="text-[10px] text-slate-400 font-mono truncate max-w-[120px]">
+                  {{ ch.accountId }}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div class="shrink-0 ml-2">
+            <span v-if="getCreatorAvatar(avatarPickerCreator) === toSecureMediaUrl(ch.avatarUrl)" class="flex items-center gap-1 text-[11px] font-bold text-indigo-600 dark:text-indigo-400">
+              <CheckCircle2 class="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+              <span>当前主头像</span>
+            </span>
+            <span v-else class="text-[10px] text-slate-400 group-hover:text-indigo-600 group-hover:underline">
+              设为主头像
+            </span>
+          </div>
+        </button>
+
+        <p v-if="!channels.some(item => item.creatorId === avatarPickerCreator?.id && item.avatarUrl)" class="text-xs text-slate-400 py-6 text-center">
+          当前创作者绑定的账号暂未获取到有效平台头像，点击账号旁的同步按钮拉取最新数据。
+        </p>
+      </div>
+
+      <div class="pt-2 border-t border-slate-100 dark:border-slate-800 flex justify-end">
+        <button
+          @click="avatarPickerCreator = null"
+          class="px-4 py-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors cursor-pointer"
+        >
+          关闭
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal: Deleted Posts Management -->
+  <div
+    v-if="showDeletedPostsModal"
+    class="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4"
+    @click.self="showDeletedPostsModal = false"
+  >
+    <div class="w-full max-w-2xl bg-white dark:bg-slate-900 rounded-3xl p-6 shadow-2xl border border-slate-200 dark:border-slate-800 space-y-4 max-h-[85vh] flex flex-col">
+      <div class="flex items-center justify-between pb-3 border-b border-slate-100 dark:border-slate-800 shrink-0">
+        <div>
+          <h3 class="font-bold text-base text-slate-900 dark:text-white flex items-center gap-2">
+            <Trash2 class="w-4 h-4 text-rose-500" />
+            <span>已删除动态管理</span>
+            <span class="text-xs px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-300 font-normal">
+              共 {{ deletedPostsList.length }} 条记录
+            </span>
+          </h3>
+          <p class="text-xs text-slate-500 mt-1">
+            已记录动态的内联 ID。顶部“一键同步”默认跳过这些动态。点击“恢复”可解除过滤，下次同步时重新拉取。
+          </p>
+        </div>
+        <button
+          type="button"
+          class="p-1.5 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+          @click="showDeletedPostsModal = false"
+        >
+          <X class="w-4 h-4" />
+        </button>
+      </div>
+
+      <!-- Search box if multiple records -->
+      <div v-if="deletedPostsList.length > 3" class="relative shrink-0">
+        <Search class="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+        <input
+          v-model="deletedPostsSearchQuery"
+          type="text"
+          placeholder="搜索已删除动态标题或 ID..."
+          class="w-full pl-9 pr-3 py-1.5 text-xs bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-500/20 text-slate-900 dark:text-white placeholder-slate-400"
+        />
+      </div>
+
+      <!-- Records List -->
+      <div class="flex-1 overflow-y-auto space-y-2 pr-1 min-h-[160px]">
+        <div v-if="filteredDeletedPostsList.length === 0" class="py-12 text-center text-xs text-slate-400">
+          {{ deletedPostsSearchQuery ? '没有找到匹配的记录' : '暂无已删除动态记录' }}
+        </div>
+        <div
+          v-for="record in filteredDeletedPostsList"
+          :key="record.id"
+          class="p-3 bg-slate-50/80 dark:bg-slate-850/60 rounded-xl border border-slate-200/70 dark:border-slate-800 flex items-center justify-between gap-3 text-xs"
+        >
+          <div class="flex items-center gap-3 min-w-0">
+            <div
+              v-if="record.postData?.mediaList?.length"
+              class="w-11 h-11 rounded-lg overflow-hidden bg-slate-200 dark:bg-slate-800 shrink-0 border border-slate-200 dark:border-slate-700"
+            >
+              <img
+                :src="toSecureMediaUrl(record.postData.mediaList[0].previewUrl)"
+                referrerpolicy="no-referrer"
+                class="w-full h-full object-cover"
+              />
+            </div>
+            <div class="min-w-0 space-y-0.5">
+              <div class="flex items-center gap-2 min-w-0">
+                <span
+                  v-if="record.platform || record.postData?.platform"
+                  :class="PLATFORM_REGISTRY[record.platform || record.postData?.platform || '']?.badgeBg"
+                  class="px-1.5 py-0.2 rounded text-[9px] font-bold border shrink-0"
+                >
+                  {{ PLATFORM_REGISTRY[record.platform || record.postData?.platform || '']?.name || record.platform }}
+                </span>
+                <span class="font-medium text-slate-800 dark:text-slate-200 truncate max-w-sm">
+                  {{ record.title || record.postData?.title || '未命名动态' }}
+                </span>
+              </div>
+              <div class="flex items-center gap-2 text-[10px] text-slate-400">
+                <span class="font-mono">ID: {{ record.id }}</span>
+                <span>•</span>
+                <span>删除于 {{ new Date(record.deletedAt).toLocaleString('zh-CN') }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div class="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              @click="handleRestoreSingleDeleted(record)"
+              class="px-2.5 py-1 text-xs font-medium text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 dark:hover:bg-indigo-900/60 rounded-lg transition-colors cursor-pointer flex items-center gap-1"
+              title="立即将此动态定向找回并无缝还原至动态流"
+            >
+              <RotateCcw class="w-3 h-3" />
+              <span>定向找回</span>
+            </button>
+            <button
+              type="button"
+              @click="handlePermanentlyDelete(record)"
+              class="p-1 text-slate-400 hover:text-rose-500 rounded-md hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors cursor-pointer"
+              title="彻底删除"
+            >
+              <Trash2 class="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Modal Footer -->
+      <div class="pt-3 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between shrink-0">
+        <div>
+          <button
+            v-if="deletedPostsList.length > 0"
+            type="button"
+            @click="handleRestoreAllAndSync"
+            class="px-3 py-1.5 text-xs font-semibold text-indigo-600 dark:text-indigo-400 bg-indigo-50 dark:bg-indigo-950/50 hover:bg-indigo-100 rounded-xl transition-colors cursor-pointer flex items-center gap-1.5"
+          >
+            <RotateCcw class="w-3.5 h-3.5" />
+            <span>全部定向找回并还原</span>
+          </button>
+        </div>
+        <button
+          type="button"
+          @click="showDeletedPostsModal = false"
+          class="px-4 py-1.5 text-xs font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-xl transition-colors cursor-pointer"
+        >
+          完成
+        </button>
       </div>
     </div>
   </div>

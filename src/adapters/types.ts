@@ -5,6 +5,10 @@ export interface FetchOptions {
   cursor?: string;
   /** Only fetch posts published after this timestamp (ms). Used for incremental sync. */
   sinceTimestamp?: number;
+  /** If true, include previously deleted posts and clear their tombstone records upon fetch */
+  restoreDeleted?: boolean;
+  /** If true, ignore sinceTimestamp watermark to force-refresh and update existing posts in local DB */
+  forceRefresh?: boolean;
 }
 
 export interface FetchResult {

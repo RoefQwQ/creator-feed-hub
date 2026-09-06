@@ -3,6 +3,7 @@ import { ref, onMounted, computed } from 'vue';
 import { db } from '../../src/db';
 import { parseProfileUrl, type ParsedProfile } from '../../src/utils/urlParser';
 import { toSecureMediaUrl } from '../../src/utils/media';
+import { bgFetch } from '../../src/utils/http';
 import { PLATFORM_REGISTRY, type Creator, type Channel } from '../../src/types';
 import { updateChannel, clearStaleUpdatingStatus } from '../../src/adapters';
 import {
@@ -179,10 +180,46 @@ async function extractActiveTabAuthorMeta(tabId: number, tabUrl?: string) {
           }
         }
         else if (host.includes('bilibili.com')) {
-          const bName = document.querySelector('#h-name, .user-name, .nickname, .bili-header__info__name')?.textContent?.trim();
-          if (bName) name = bName;
-          const bAvatar = document.querySelector('#h-avatar img, #h-avatar, .bili-avatar-img, .bili-avatar img, .header-avatar img, .user-avatar img') as HTMLImageElement | null;
-          avatar = bAvatar?.currentSrc || bAvatar?.src || '';
+          // Exclude viewer's top navigation bar (.bili-header, .mini-header, etc.)
+          const notInGlobalHeader = (el: Element | null): boolean => {
+            if (!el) return false;
+            return !el.closest('#bili-header, .bili-header, .bili-header__bar, .mini-header, .international-header');
+          };
+
+          // 1. Author name
+          const nameCandidates = [
+            document.querySelector('#h-name'),
+            document.querySelector('#space-header #h-name'),
+            document.querySelector('.up-name'),
+            document.querySelector('.user-name'),
+            document.querySelector('.nickname'),
+          ];
+          for (const cand of nameCandidates) {
+            if (cand && notInGlobalHeader(cand) && cand.textContent?.trim()) {
+              name = cand.textContent.trim();
+              break;
+            }
+          }
+
+          // 2. Creator avatar strictly within space header / UP info
+          const spaceHeader = document.querySelector('#wrapper #header, #space-header, .space-header, #h-center, .space-header-avatar, #h-avatar');
+          if (spaceHeader) {
+            const upAvatarImg = spaceHeader.querySelector('#h-avatar img, .h-avatar img, img[src*="bfs/face"], img[src*="hdslb.com/bfs/face"], img') as HTMLImageElement | null;
+            if (upAvatarImg && notInGlobalHeader(upAvatarImg)) {
+              avatar = upAvatarImg.currentSrc || upAvatarImg.src || '';
+            }
+          }
+
+          if (!avatar) {
+            // Find avatars specifically excluding top header
+            const avatarNodes = Array.from(document.querySelectorAll('#h-avatar img, .space-header-avatar img, .up-info__avatar img, img[src*="hdslb.com/bfs/face"]'));
+            for (const node of avatarNodes) {
+              if (notInGlobalHeader(node) && (node as HTMLImageElement).src) {
+                avatar = (node as HTMLImageElement).currentSrc || (node as HTMLImageElement).src;
+                break;
+              }
+            }
+          }
         }
         // 4. Xiaohongshu
         else if (host.includes('xiaohongshu.com')) {
@@ -221,6 +258,28 @@ async function extractActiveTabAuthorMeta(tabId: number, tabUrl?: string) {
       }
       if (avatar) {
         detectedAuthorMeta.value.avatar = toSecureMediaUrl(avatar);
+      }
+    }
+
+    // Authoritative fallback for Bilibili: public User Card API directly by UID
+    if (parsed.value?.platform === 'bilibili' && parsed.value.accountId) {
+      try {
+        const cardRes = await bgFetch(`https://api.bilibili.com/x/web-interface/card?mid=${encodeURIComponent(parsed.value.accountId)}`);
+        if (cardRes.ok && cardRes.data) {
+          const cardJson = JSON.parse(cardRes.data);
+          if (cardJson?.code === 0 && cardJson?.data?.card) {
+            const cardData = cardJson.data.card;
+            if (cardData.name) {
+              detectedAuthorMeta.value.name = cardData.name;
+              newCreatorName.value = cardData.name;
+            }
+            if (cardData.face) {
+              detectedAuthorMeta.value.avatar = toSecureMediaUrl(cardData.face);
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[Popup] Bilibili card API fetch skipped:', e);
       }
     }
   } catch (err) {
@@ -288,6 +347,28 @@ async function handleUrl(urlStr: string) {
       existingCreator.value = null;
       if (creators.value.length > 0) {
         selectedCreatorId.value = creators.value[0].id;
+      }
+    }
+
+    // If platform is Bilibili, proactively fetch authoritative public card info
+    if (res.platform === 'bilibili' && res.accountId) {
+      try {
+        const cardRes = await bgFetch(`https://api.bilibili.com/x/web-interface/card?mid=${encodeURIComponent(res.accountId)}`);
+        if (cardRes.ok && cardRes.data) {
+          const cardJson = JSON.parse(cardRes.data);
+          if (cardJson?.code === 0 && cardJson?.data?.card) {
+            const cardData = cardJson.data.card;
+            if (cardData.name) {
+              detectedAuthorMeta.value.name = cardData.name;
+              newCreatorName.value = cardData.name;
+            }
+            if (cardData.face) {
+              detectedAuthorMeta.value.avatar = toSecureMediaUrl(cardData.face);
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('[Popup] Bilibili card fetch in handleUrl skipped:', e);
       }
     }
   }
@@ -385,16 +466,16 @@ const currentPlatformMeta = computed(() => {
         <img src="/icons/icon-48.png" class="w-7 h-7 rounded-xl shadow-xs shrink-0" alt="Creator Feed Hub" />
         <div>
           <h1 class="font-bold text-sm tracking-tight text-slate-900 dark:text-white">Creator Feed Hub</h1>
-          <p class="text-[10px] text-slate-500">跨平台创作者聚合关注</p>
+          <p class="text-[10px] text-slate-500">创作者聚合追踪</p>
         </div>
       </div>
       <button
         @click="openDashboard"
-        title="在新标签页中打开全屏展台"
+        title="打开面板"
         class="flex items-center gap-1 px-2.5 py-1 text-xs font-medium text-indigo-600 bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/50 dark:text-indigo-300 dark:hover:bg-indigo-900/50 rounded-md transition-colors cursor-pointer"
       >
         <LayoutDashboard class="w-3.5 h-3.5" />
-        <span>打开展台</span>
+        <span>打开面板</span>
       </button>
     </div>
 
@@ -425,7 +506,7 @@ const currentPlatformMeta = computed(() => {
     <div class="my-3 flex-1">
       <!-- Loading -->
       <div v-if="loading" class="py-12 text-center text-slate-400">
-        正在智能解析当前页面...
+        正在识别...
       </div>
 
       <!-- Detected Platform Card -->
@@ -440,7 +521,7 @@ const currentPlatformMeta = computed(() => {
               >
                 {{ currentPlatformMeta?.name }}
               </span>
-              <span class="text-slate-400 text-[10px]">已识别主页/频道</span>
+              <span class="text-slate-400 text-[10px]">已识别</span>
             </div>
             <a
               :href="parsed.cleanUrl"
@@ -466,11 +547,11 @@ const currentPlatformMeta = computed(() => {
               <div class="font-bold text-slate-800 dark:text-slate-100 text-sm truncate flex items-center gap-1.5">
                 <span>{{ activeDisplayName || parsed.accountId }}</span>
                 <span v-if="detectedAuthorMeta.name" class="px-1.5 py-0.2 rounded text-[9px] bg-emerald-50 text-emerald-700 dark:bg-emerald-950/60 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 shrink-0">
-                  真实昵称
+                  页面昵称
                 </span>
               </div>
               <div class="text-[11px] text-slate-400 truncate mt-0.5 flex items-center gap-1">
-                <span>账号标识:</span>
+                <span>ID:</span>
                 <span class="font-mono text-slate-500 dark:text-slate-400">{{ parsed.accountId }}</span>
               </div>
             </div>
@@ -484,16 +565,16 @@ const currentPlatformMeta = computed(() => {
         >
           <div class="flex items-center gap-1.5 font-semibold text-xs mb-1">
             <Check class="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-            <span>该账号已在关注库中</span>
+            <span>已关注</span>
           </div>
           <p class="text-[11px] text-emerald-700 dark:text-emerald-300">
-            已归属于创作者：<strong>{{ existingCreator?.name || '未知创作者' }}</strong>
+            已归集到 <strong>{{ existingCreator?.name || '未知创作者' }}</strong>
           </p>
           <button
             @click="openDashboard"
             class="mt-2.5 w-full py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-medium transition-colors cursor-pointer"
           >
-            前往展台查看动态
+            查看动态
           </button>
         </div>
 
@@ -505,7 +586,7 @@ const currentPlatformMeta = computed(() => {
               :class="mode === 'new' ? 'bg-white dark:bg-slate-700 shadow-xs text-slate-900 dark:text-white font-medium' : 'text-slate-500'"
               class="flex-1 py-1 text-center rounded-md text-[11px] transition-all cursor-pointer"
             >
-              作为新创作者关注
+              新建创作者
             </button>
             <button
               @click="mode = 'bind'"
@@ -513,14 +594,14 @@ const currentPlatformMeta = computed(() => {
               :class="mode === 'bind' ? 'bg-white dark:bg-slate-700 shadow-xs text-slate-900 dark:text-white font-medium' : 'text-slate-500'"
               class="flex-1 py-1 text-center rounded-md text-[11px] transition-all disabled:opacity-40 cursor-pointer"
             >
-              归集至已有创作者 ({{ creators.length }})
+              绑定到已有 ({{ creators.length }})
             </button>
           </div>
 
           <!-- Mode: New Creator -->
           <div v-if="mode === 'new'" class="space-y-2">
             <div>
-              <label class="block text-[11px] font-medium text-slate-700 dark:text-slate-300 mb-1">创作者主名称</label>
+              <label class="block text-[11px] font-medium text-slate-700 dark:text-slate-300 mb-1">创作者名称</label>
               <div class="relative">
                 <input
                   v-model="newCreatorName"
@@ -536,8 +617,8 @@ const currentPlatformMeta = computed(() => {
                 class="mt-1.5 p-2 bg-indigo-50/90 dark:bg-indigo-950/60 border border-indigo-200/80 dark:border-indigo-800 rounded-xl space-y-1.5"
               >
                 <div class="flex items-center justify-between text-[11px] text-indigo-800 dark:text-indigo-300 font-medium">
-                  <span>💡 匹配到已有创作者：</span>
-                  <span class="text-[10px] text-indigo-500">点击直接归集</span>
+                  <span>已有创作者：</span>
+                  <span class="text-[10px] text-indigo-500">点击绑定</span>
                 </div>
                 <div class="space-y-1 max-h-32 overflow-y-auto">
                   <div
@@ -562,14 +643,14 @@ const currentPlatformMeta = computed(() => {
                       </div>
                     </div>
                     <span class="text-[10px] text-indigo-600 dark:text-indigo-400 font-bold px-2 py-0.5 rounded bg-indigo-50 dark:bg-indigo-950/80 shrink-0">
-                      归集到TA →
+                      绑定 →
                     </span>
                   </div>
                 </div>
               </div>
             </div>
             <div>
-              <label class="block text-[11px] font-medium text-slate-700 dark:text-slate-300 mb-1">分类标签 (逗号分隔)</label>
+              <label class="block text-[11px] font-medium text-slate-700 dark:text-slate-300 mb-1">标签（逗号分隔）</label>
               <input
                 v-model="newCreatorTags"
                 type="text"
@@ -583,8 +664,8 @@ const currentPlatformMeta = computed(() => {
           <div v-else class="space-y-2">
             <div>
               <div class="flex items-center justify-between mb-1">
-                <label class="block text-[11px] font-medium text-slate-700 dark:text-slate-300">目标归集创作者</label>
-                <span class="text-[10px] text-slate-400">支持姓名/标签搜索</span>
+                <label class="block text-[11px] font-medium text-slate-700 dark:text-slate-300">选择创作者</label>
+                <span class="text-[10px] text-slate-400">可搜索</span>
               </div>
 
               <!-- Case A: Selected creator card -->
@@ -665,13 +746,13 @@ const currentPlatformMeta = computed(() => {
                   </div>
 
                   <div v-if="filteredCandidateCreators.length === 0" class="p-2.5 text-center text-xs text-slate-400 space-y-1">
-                    <div>未找到包含“{{ creatorSearchQuery }}”的创作者</div>
+                    <div>未找到 "{{ creatorSearchQuery }}"</div>
                     <button
                       type="button"
                       @click="switchToNewCreatorWithQuery(creatorSearchQuery)"
                       class="text-indigo-600 dark:text-indigo-400 hover:underline font-semibold cursor-pointer text-[11px]"
                     >
-                      + 作为新博主【{{ creatorSearchQuery }}】关注
+                      + 新建创作者「{{ creatorSearchQuery }}」
                     </button>
                   </div>
                 </div>
@@ -683,13 +764,13 @@ const currentPlatformMeta = computed(() => {
               v-if="samePlatformAccounts.length > 0"
               class="p-2 bg-sky-50 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800/60 rounded-lg text-[10px] text-sky-800 dark:text-sky-200 leading-tight"
             >
-              💡 该博主已绑定同平台账号（{{ samePlatformAccounts[0].displayName || samePlatformAccounts[0].accountId }}），本次将追加为副号/小号互通归集。
+              该创作者已有同平台账号（{{ samePlatformAccounts[0].displayName || samePlatformAccounts[0].accountId }}），本次将作为副号绑定。
             </div>
           </div>
 
           <!-- Account Role / Tag selector (Common to both modes) -->
           <div class="space-y-1.5 pt-1 border-t border-slate-100 dark:border-slate-800">
-            <label class="block text-[11px] font-medium text-slate-700 dark:text-slate-300">账号定位与标签：</label>
+            <label class="block text-[11px] font-medium text-slate-700 dark:text-slate-300">账号类型：</label>
             <div class="grid grid-cols-4 gap-1">
               <button
                 type="button"
@@ -697,7 +778,7 @@ const currentPlatformMeta = computed(() => {
                 :class="accountRole === 'main' ? 'bg-amber-100 text-amber-800 border-amber-300 dark:bg-amber-950/80 dark:text-amber-300 dark:border-amber-700 font-bold' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-transparent'"
                 class="py-1 text-[10px] rounded border transition-all cursor-pointer text-center"
               >
-                👑 主账号
+                主账号
               </button>
               <button
                 type="button"
@@ -705,7 +786,7 @@ const currentPlatformMeta = computed(() => {
                 :class="accountRole === 'sub' ? 'bg-sky-100 text-sky-800 border-sky-300 dark:bg-sky-950/80 dark:text-sky-300 dark:border-sky-700 font-bold' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-transparent'"
                 class="py-1 text-[10px] rounded border transition-all cursor-pointer text-center"
               >
-                🏷️ 日常小号
+                小号
               </button>
               <button
                 type="button"
@@ -713,7 +794,7 @@ const currentPlatformMeta = computed(() => {
                 :class="accountRole === 'alt' ? 'bg-rose-100 text-rose-800 border-rose-300 dark:bg-rose-950/80 dark:text-rose-300 dark:border-rose-700 font-bold' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-transparent'"
                 class="py-1 text-[10px] rounded border transition-all cursor-pointer text-center"
               >
-                🔞 里号/差分
+                里号
               </button>
               <button
                 type="button"
@@ -721,7 +802,7 @@ const currentPlatformMeta = computed(() => {
                 :class="accountRole === 'custom' ? 'bg-purple-100 text-purple-800 border-purple-300 dark:bg-purple-950/80 dark:text-purple-300 dark:border-purple-700 font-bold' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 border-transparent'"
                 class="py-1 text-[10px] rounded border transition-all cursor-pointer text-center"
               >
-                🔖 自定义
+                自定义
               </button>
             </div>
             <div v-if="accountRole === 'custom'" class="mt-1">
@@ -741,7 +822,7 @@ const currentPlatformMeta = computed(() => {
             class="w-full py-2 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg text-xs font-semibold shadow-xs flex items-center justify-center gap-1.5 transition-all cursor-pointer"
           >
             <PlusCircle class="w-3.5 h-3.5" />
-            <span>{{ saving ? '正在添加并同步首批动态...' : '确认关注并加入聚合' }}</span>
+            <span>{{ saving ? '添加中...' : '确认关注' }}</span>
           </button>
         </div>
       </div>
@@ -751,15 +832,15 @@ const currentPlatformMeta = computed(() => {
         <div class="p-3 bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/60 rounded-xl">
           <div class="flex items-center gap-1.5 text-amber-800 dark:text-amber-200 font-semibold mb-1">
             <AlertCircle class="w-4 h-4 text-amber-600" />
-            <span>当前页面未识别为创作者主页</span>
+            <span>未识别到创作者</span>
           </div>
           <p class="text-[10px] text-amber-700 dark:text-amber-300">
-            支持 B站、Twitter、YouTube、Pixiv、Fantia、Rplay、Withny 等平台主页。
+            请导航到支持的创作者主页
           </p>
         </div>
 
         <div class="space-y-2">
-          <label class="block text-[11px] font-medium text-slate-700 dark:text-slate-300">手动粘贴博主主页链接：</label>
+          <label class="block text-[11px] font-medium text-slate-700 dark:text-slate-300">手动输入链接：</label>
           <div class="flex gap-1.5">
             <input
               v-model="manualUrl"
@@ -772,7 +853,7 @@ const currentPlatformMeta = computed(() => {
               @click="handleManualParse"
               class="px-3 py-1.5 bg-slate-800 dark:bg-slate-200 text-white dark:text-slate-900 rounded-lg text-xs font-medium hover:opacity-90"
             >
-              解析
+              识别
             </button>
           </div>
         </div>
@@ -782,13 +863,13 @@ const currentPlatformMeta = computed(() => {
     <!-- Bottom Statistics & Direct Dashboard Access -->
     <div class="pt-3 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between text-[11px] text-slate-500">
       <div class="flex items-center gap-2">
-        <span>关注博主: <strong class="text-slate-800 dark:text-slate-200">{{ creators.length }}</strong></span>
+        <span>关注: <strong class="text-slate-800 dark:text-slate-200">{{ creators.length }}</strong></span>
       </div>
       <button
         @click="openDashboard"
         class="flex items-center gap-1 text-indigo-600 hover:text-indigo-700 dark:text-indigo-400 font-medium"
       >
-        <span>打开全屏展台</span>
+        <span>打开面板</span>
         <ExternalLink class="w-3 h-3" />
       </button>
     </div>
